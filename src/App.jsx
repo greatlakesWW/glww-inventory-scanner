@@ -184,14 +184,13 @@ export default function App() {
           item.displayname AS itemname,
           item.upccode AS upc,
           ib.quantityonhand AS expected_qty,
-          bin.binnumber AS bin_number
+          BUILTIN.DF(ib.binnumber) AS bin_number
         FROM inventorybalance ib
         JOIN item ON ib.item = item.id
-        LEFT JOIN bin ON ib.binnumber = bin.id
         WHERE ib.location = ${selectedLocation.id}
           AND item.class IN (${classIds})
           AND ib.quantityonhand > 0
-        ORDER BY bin.binnumber, item.itemid
+        ORDER BY BUILTIN.DF(ib.binnumber), item.itemid
       `);
 
       setExpected(items);
