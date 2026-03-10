@@ -1,0 +1,23 @@
+{
+  "INFOWEDGE_CONFIG": {
+    "version": "1.0",
+    "description": "GLWW Inventory Scanner - Chrome Profile",
+    "profiles": [
+      {
+        "name": "GLWW_Scanner",
+        "enabled": true,
+        "associated_apps": [{ "package": "com.android.chrome", "activity": "*" }],
+        "scanner": {
+          "enabled": true,
+          "symbologies": {
+            "UPC-A": true, "UPC-E": true, "EAN-13": true, "EAN-8": true,
+            "Code 128": true, "Code 39": true, "QR Code": true, "Data Matrix": true
+          }
+        },
+        "keystroke_output": { "enabled": true, "action_key": "ENTER", "inter_character_delay": 0 },
+        "intent_output": { "enabled": false },
+        "basic_data_formatting": { "enabled": true, "send_enter_key": true, "prefix": "", "suffix": "" }
+      }
+    ]
+  }
+}
