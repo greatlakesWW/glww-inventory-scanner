@@ -1,21 +1,20 @@
 import crypto from "crypto";
 
 // ─── NetSuite TBA credentials from Vercel environment variables ───
-// Set these in Vercel Dashboard → Settings → Environment Variables
 const getConfig = () => ({
-  accountId: process.env.NS_ACCOUNT_ID,            // e.g. "9405258"
-  consumerKey: process.env.NS_CONSUMER_KEY,         // From Integration Record
-  consumerSecret: process.env.NS_CONSUMER_SECRET,   // From Integration Record
-  tokenId: process.env.NS_TOKEN_ID,                 // From Access Token
-  tokenSecret: process.env.NS_TOKEN_SECRET,          // From Access Token
+  accountId: process.env.NS_ACCOUNT_ID,
+  consumerKey: process.env.NS_CONSUMER_KEY,
+  consumerSecret: process.env.NS_CONSUMER_SECRET,
+  tokenId: process.env.NS_TOKEN_ID,
+  tokenSecret: process.env.NS_TOKEN_SECRET,
 });
 
 // ─── OAuth 1.0 Signature (HMAC-SHA256) ───
-function generateOAuthHeader(method, url, config) {
+function generateOAuthHeader(method, baseUrl, queryParams, config) {
   const nonce = crypto.randomBytes(16).toString("hex");
   const timestamp = Math.floor(Date.now() / 1000).toString();
 
-  const params = {
+  const oauthParams = {
     oauth_consumer_key: config.consumerKey,
     oauth_nonce: nonce,
     oauth_signature_method: "HMAC-SHA256",
@@ -24,14 +23,14 @@ function generateOAuthHeader(method, url, config) {
     oauth_version: "1.0",
   };
 
-  // Build base string
-  const sortedParams = Object.keys(params)
+  // Merge OAuth params + query params for signature base string
+  const allParams = { ...oauthParams, ...queryParams };
+
+  const sortedParams = Object.keys(allParams)
     .sort()
-    .map((k) => `${encodeRFC3986(k)}=${encodeRFC3986(params[k])}`)
+    .map((k) => `${encodeRFC3986(k)}=${encodeRFC3986(String(allParams[k]))}`)
     .join("&");
 
-  // Strip query params from URL for base string
-  const baseUrl = url.split("?")[0];
   const baseString = `${method.toUpperCase()}&${encodeRFC3986(baseUrl)}&${encodeRFC3986(sortedParams)}`;
 
   // Sign
@@ -41,11 +40,11 @@ function generateOAuthHeader(method, url, config) {
     .update(baseString)
     .digest("base64");
 
-  // Build header
+  // Build header — only OAuth params + realm + signature (NOT query params)
   const headerParams = {
-    ...params,
-    oauth_signature: signature,
     realm: config.accountId,
+    ...oauthParams,
+    oauth_signature: signature,
   };
 
   const header =
@@ -90,9 +89,10 @@ export default async function handler(req, res) {
   }
 
   const baseUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/query/v1/suiteql`;
+  const queryParams = { limit: String(limit), offset: String(offset) };
   const fullUrl = `${baseUrl}?limit=${limit}&offset=${offset}`;
 
-  const authHeader = generateOAuthHeader("POST", baseUrl, config);
+  const authHeader = generateOAuthHeader("POST", baseUrl, queryParams, config);
 
   try {
     const nsResponse = await fetch(fullUrl, {
