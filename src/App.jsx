@@ -78,33 +78,54 @@ const Logo = () => (
 // ═══════════════════════════════════════════════════════════
 // MAIN APP
 // ═══════════════════════════════════════════════════════════
+const SESSION_KEY = "glww_scanner_session";
+const loadSession = () => {
+  try { const raw = localStorage.getItem(SESSION_KEY); if (raw) return JSON.parse(raw); } catch (e) {} return null;
+};
+const saveSession = (data) => {
+  try { localStorage.setItem(SESSION_KEY, JSON.stringify(data)); } catch (e) {}
+};
+const clearSession = () => {
+  try { localStorage.removeItem(SESSION_KEY); } catch (e) {}
+};
+
 export default function App() {
-  const [phase, setPhase] = useState("setup");
+  const saved = useRef(loadSession()).current;
+
+  const [phase, setPhase] = useState(saved?.phase || "setup");
   const [loading, setLoading] = useState(false);
   const [loadMsg, setLoadMsg] = useState("");
   const [error, setError] = useState(null);
 
   // Setup
-  const [classes, setClasses] = useState([]);
-  const [locations, setLocations] = useState([]);
-  const [classPath, setClassPath] = useState([]);
-  const [selectedClassId, setSelectedClassId] = useState(null);
-  const [selectedLocation, setSelectedLocation] = useState(null);
-  const [adjustAcct, setAdjustAcct] = useState("");
+  const [classes, setClasses] = useState(saved?.classes || []);
+  const [locations, setLocations] = useState(saved?.locations || []);
+  const [classPath, setClassPath] = useState(saved?.classPath || []);
+  const [selectedClassId, setSelectedClassId] = useState(saved?.selectedClassId || null);
+  const [selectedLocation, setSelectedLocation] = useState(saved?.selectedLocation || null);
+  const [adjustAcct, setAdjustAcct] = useState(saved?.adjustAcct || "");
 
   // Inventory
-  const [expected, setExpected] = useState([]);
+  const [expected, setExpected] = useState(saved?.expected || []);
 
   // Scanning
-  const [currentBin, setCurrentBin] = useState(null);
-  const [binHistory, setBinHistory] = useState([]);
-  const [scans, setScans] = useState({});
-  const [scanLog, setScanLog] = useState([]);
+  const [currentBin, setCurrentBin] = useState(saved?.currentBin || null);
+  const [binHistory, setBinHistory] = useState(saved?.binHistory || []);
+  const [scans, setScans] = useState(saved?.scans || {});
+  const [scanLog, setScanLog] = useState(saved?.scanLog || []);
   const [flash, setFlash] = useState(null);
-  const [filter, setFilter] = useState("");
+  const [filter, setFilter] = useState(saved?.filter || "");
 
   const scanRef = useRef(null);
   const binRef = useRef(null);
+
+  // ── AUTO SAVE SESSION ──
+  useEffect(() => {
+    saveSession({
+      phase, classes, locations, classPath, selectedClassId, selectedLocation,
+      adjustAcct, expected, currentBin, binHistory, scans, scanLog, filter
+    });
+  }, [phase, classes, locations, classPath, selectedClassId, selectedLocation, adjustAcct, expected, currentBin, binHistory, scans, scanLog, filter]);
 
   // ── DERIVED ──
   const upcLookup = useMemo(() => {
