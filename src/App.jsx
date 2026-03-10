@@ -215,7 +215,7 @@ export default function App() {
     const key = currentBin ? `${currentBin}::${trimmed}` : trimmed;
     const match = upcLookup[trimmed];
     setScans(p => ({ ...p, [key]: (p[key] || 0) + 1 }));
-    setScanLog(p => [{ upc: trimmed, bin: currentBin, time: new Date(), itemname: match?.itemname || null }, ...p]);
+    setScanLog(p => [{ upc: trimmed, bin: currentBin, time: new Date(), itemname: match?.itemname || null, sku: match?.sku || null }, ...p]);
     if (match) { beepOk(); setFlash("ok"); } else { beepWarn(); setFlash("warn"); }
     setTimeout(() => setFlash(null), 400);
   }, [upcLookup, currentBin]);
@@ -230,27 +230,76 @@ export default function App() {
 
   const switchBin = () => { setCurrentBin(null); setTimeout(() => binRef.current?.focus(), 100); };
 
+  const restartCount = () => {
+    if (!confirm("Clear all scans and start over?")) return;
+    setScans({});
+    setScanLog([]);
+    setBinHistory([]);
+    setCurrentBin(null);
+    setFlash(null);
+    setFilter("");
+  };
+
+  // Manual SKU entry - find item by SKU in expected list
+  const [showManualAdd, setShowManualAdd] = useState(false);
+  const [manualSku, setManualSku] = useState("");
+  const manualRef = useRef(null);
+
+  const skuLookup = useMemo(() => {
+    const m = {};
+    expected.forEach(item => { if (item.sku) m[item.sku.toUpperCase()] = item; });
+    return m;
+  }, [expected]);
+
+  const handleManualAdd = () => {
+    const trimmed = manualSku.trim().toUpperCase();
+    if (!trimmed) return;
+    const match = skuLookup[trimmed];
+    if (match && match.upc) {
+      // Found it — add as if scanned by UPC
+      handleItemScan(match.upc);
+      setManualSku("");
+      setShowManualAdd(false);
+    } else if (match && !match.upc) {
+      // Item found but no UPC — use SKU as the key
+      const key = currentBin ? `${currentBin}::SKU:${match.sku}` : `SKU:${match.sku}`;
+      setScans(p => ({ ...p, [key]: (p[key] || 0) + 1 }));
+      setScanLog(p => [{ upc: `SKU:${match.sku}`, bin: currentBin, time: new Date(), itemname: match.itemname, sku: match.sku }, ...p]);
+      beepOk(); setFlash("ok"); setTimeout(() => setFlash(null), 400);
+      setManualSku("");
+      setShowManualAdd(false);
+    } else {
+      setError(`SKU "${trimmed}" not found in expected inventory.`);
+    }
+  };
+
   // ── COMPARISON ──
   const getComparison = useCallback(() => {
     const rows = []; const done = new Set();
     expected.forEach(item => {
       const upc = item.upc || ""; const bin = item.bin_number || "";
-      const key = bin ? `${bin}::${upc}` : upc;
-      const sq = scans[key] || 0; const eq = Number(item.expected_qty) || 0;
+      // Check for UPC-keyed scan first, then SKU-keyed
+      const upcKey = bin ? `${bin}::${upc}` : upc;
+      const skuKey = bin ? `${bin}::SKU:${item.sku}` : `SKU:${item.sku}`;
+      const sq = (upc ? (scans[upcKey] || 0) : 0) + (scans[skuKey] || 0);
+      const eq = Number(item.expected_qty) || 0;
       let status = "matched";
       if (sq === 0) status = "review"; else if (sq !== eq) status = "variance";
       rows.push({ ...item, upc, bin, scanned_qty: sq, expected_qty: eq, status, diff: sq - eq });
-      done.add(key);
+      if (upc) done.add(upcKey);
+      done.add(skuKey);
     });
     Object.entries(scans).forEach(([key, count]) => {
       if (!done.has(key)) {
-        const [bin, upc] = key.includes("::") ? key.split("::") : ["", key];
-        const m = upcLookup[upc];
-        rows.push({ internalid: m?.internalid || "", sku: m?.sku || "", itemname: m?.itemname || `Unknown (${upc})`, upc, bin, scanned_qty: count, expected_qty: 0, status: "unexpected", diff: count });
+        const [bin, val] = key.includes("::") ? key.split("::") : ["", key];
+        const upc = val.startsWith("SKU:") ? "" : val;
+        const sku = val.startsWith("SKU:") ? val.replace("SKU:", "") : "";
+        const m = upc ? upcLookup[upc] : skuLookup[sku.toUpperCase()];
+        rows.push({ internalid: m?.internalid || "", sku: m?.sku || sku || "", itemname: m?.itemname || `Unknown (${val})`, upc: upc || "", bin, scanned_qty: count, expected_qty: 0, status: "unexpected", diff: count });
       }
     });
     return rows;
-  }, [expected, scans, upcLookup]);
+  }, [expected, scans, upcLookup, skuLookup]);
 
   // ── CSV EXPORTS ──
   const today = () => new Date().toISOString().slice(0, 10);
@@ -277,6 +326,83 @@ export default function App() {
     const h = "External ID,Adjustment Account,Adjustment Location,Item,Adjustment: Adjust Qty By,Adjustment: Bin Number,Inventory Detail: Quantity,Inventory Detail: Bin Number\n";
     const b = rows.map(r => `"${extId}","${acct}","${selectedLocation?.name}","${r.sku || r.internalid}",${r.diff},"${r.bin}",${r.diff},"${r.bin}"`).join("\n");
     dl(h + b, `ns_import_${locName}_${today()}.csv`);
+  };
+
+  // ── SHARE / EMAIL ──
+  const [emailTo, setEmailTo] = useState("");
+  const [showEmailModal, setShowEmailModal] = useState(false);
+  const [emailSending, setEmailSending] = useState(false);
+  const [emailType, setEmailType] = useState("detail"); // "detail" | "ns"
+
+  const buildCSVFile = (type) => {
+    const rows = type === "ns" ? getComparison().filter(r => r.diff !== 0) : getComparison();
+    if (type === "ns" && rows.length === 0) return null;
+    const locName = (selectedLocation?.name || "").replace(/\s+/g, "_");
+    let content, filename;
+    if (type === "ns") {
+      const extId = `ADJ_${locName}_${today()}`;
+      const acct = adjustAcct || "Inventory Adjustments";
+      const h = "External ID,Adjustment Account,Adjustment Location,Item,Adjustment: Adjust Qty By,Adjustment: Bin Number,Inventory Detail: Quantity,Inventory Detail: Bin Number\n";
+      const b = rows.map(r => `"${extId}","${acct}","${selectedLocation?.name}","${r.sku || r.internalid}",${r.diff},"${r.bin}",${r.diff},"${r.bin}"`).join("\n");
+      content = h + b;
+      filename = `ns_import_${locName}_${today()}.csv`;
+    } else {
+      const h = "Internal ID,SKU,Item Name,UPC,Bin,Expected Qty,Scanned Qty,Difference,Status\n";
+      const b = rows.map(r => `"${r.internalid}","${r.sku}","${(r.itemname || "").replace(/"/g, '""')}","${r.upc}","${r.bin}",${r.expected_qty},${r.scanned_qty},${r.diff},"${ST[r.status].l}"`).join("\n");
+      content = h + b;
+      filename = `count_detail_${locName}_${today()}.csv`;
+    }
+    return new File([content], filename, { type: "text/csv" });
+  };
+
+  const shareCSV = async (type) => {
+    const file = buildCSVFile(type);
+    if (!file) { setError("All counts match. No adjustments needed."); return; }
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({
+          title: `Inventory Count - ${selectedLocation?.name}`,
+          text: `${classPath.map(c => c.name).join(" > ")} count at ${selectedLocation?.name} (${today()})`,
+          files: [file],
+        });
+      } catch (e) {
+        if (e.name !== "AbortError") { setError("Share failed: " + e.message); }
+      }
+    } else {
+      // Fallback — just download
+      const url = URL.createObjectURL(file);
+      const a = document.createElement("a"); a.href = url; a.download = file.name; a.click();
+      URL.revokeObjectURL(url);
+    }
+  };
+
+  const emailCSV = async (type) => {
+    if (!emailTo.trim()) { setError("Enter an email address."); return; }
+    const file = buildCSVFile(type);
+    if (!file) { setError("All counts match. No adjustments needed."); return; }
+    setEmailSending(true);
+    try {
+      const content = await file.text();
+      const resp = await fetch("/api/email", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          to: emailTo.trim(),
+          subject: `Inventory Count - ${selectedLocation?.name} - ${today()}`,
+          body: `${classPath.map(c => c.name).join(" > ")} count at ${selectedLocation?.name}\n\nMatched: ${stats.matched} | Variance: ${stats.variance} | Review: ${stats.review} | Unexpected: ${stats.unexpected}\n\nCSV file attached.`,
+          filename: file.name,
+          csv: content,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || "Send failed");
+      setShowEmailModal(false);
+      setError(null);
+    } catch (e) {
+      setError("Email failed: " + e.message);
+    } finally {
+      setEmailSending(false);
+    }
   };
 
   // ═══════════════════════════════════════════════════════════
@@ -362,6 +488,18 @@ export default function App() {
             </div>
           )}
 
+          {/* EMAIL RECIPIENT */}
+          {classes.length > 0 && (
+            <div style={S.card}>
+              <label style={S.lbl}>Email Results To (optional)</label>
+              <select style={{ ...S.inp, appearance: "auto" }} value={emailTo} onChange={e => setEmailTo(e.target.value)}>
+                <option value="">None</option>
+                <option value="rebecca@greatlakesworkwear.com">rebecca@greatlakesworkwear.com</option>
+                <option value="bryce@greatlakesworkwear.com">bryce@greatlakesworkwear.com</option>
+              </select>
+            </div>
+          )}
+
           {error && hasData && <div style={S.err}>{error}</div>}
           {loading && hasData && <div style={S.load}>{loadMsg}</div>}
 
@@ -384,7 +522,12 @@ export default function App() {
     const fb = flash === "ok" ? "rgba(34,197,94,0.5)" : flash === "warn" ? "rgba(245,158,11,0.5)" : flash === "bin" ? "rgba(99,102,241,0.5)" : "rgba(255,255,255,0.06)";
 
     const binScans = {};
-    if (currentBin) Object.entries(scans).forEach(([k, v]) => { if (k.startsWith(`${currentBin}::`)) binScans[k.split("::")[1]] = v; });
+    if (currentBin) Object.entries(scans).forEach(([k, v]) => {
+      if (k.startsWith(`${currentBin}::`)) {
+        const val = k.split("::")[1];
+        binScans[val] = v;
+      }
+    });
     const binItemsTotal = binExpected.reduce((a, i) => a + (Number(i.expected_qty) || 0), 0);
     const binScannedTotal = Object.values(binScans).reduce((a, b) => a + b, 0);
 
@@ -442,7 +585,7 @@ export default function App() {
               </div>
               <input ref={scanRef} style={{ ...S.inp, fontSize: 20, textAlign: "center", ...mono }} placeholder="Scan item..." autoFocus
                 onKeyDown={e => { if (e.key === "Enter") { handleItemScan(e.target.value); e.target.value = ""; } }} />
-              {scanLog.length > 0 && <div style={{ marginTop: 6, fontSize: 11, color: "#64748b" }}>Last: <span style={mono}>{scanLog[0]?.upc}</span>{scanLog[0]?.itemname && <span> — {scanLog[0].itemname}</span>}</div>}
+              {scanLog.length > 0 && <div style={{ marginTop: 6, fontSize: 11, color: "#64748b" }}>Last: <span style={mono}>{scanLog[0]?.upc}</span>{scanLog[0]?.sku && <span> — {scanLog[0].sku}</span>}</div>}
               <button style={{ ...S.btnSm, marginTop: 8, fontSize: 11 }} onClick={undoLast} disabled={scanLog.length === 0}>Undo Last</button>
             </div>
 
@@ -454,14 +597,14 @@ export default function App() {
                 </div>
                 <div style={{ maxHeight: 240, overflowY: "auto" }}>
                   {binExpected.map((item, i) => {
-                    const sq = binScans[item.upc] || 0;
+                    const sq = binScans[item.upc] || binScans[`SKU:${item.sku}`] || 0;
                     const eq = Number(item.expected_qty) || 0;
                     const done = sq >= eq;
                     return (
                       <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", borderBottom: "1px solid rgba(255,255,255,0.03)", background: done ? "rgba(34,197,94,0.04)" : "transparent", opacity: done ? 0.6 : 1 }}>
                         <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textDecoration: done ? "line-through" : "none", color: done ? "#22c55e" : "#e2e8f0" }}>{item.itemname || item.sku}</div>
-                          <div style={{ fontSize: 11, color: "#64748b", ...mono }}>{item.upc}</div>
+                          <div style={{ fontSize: 13, fontWeight: 600, ...mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textDecoration: done ? "line-through" : "none", color: done ? "#22c55e" : "#e2e8f0" }}>{item.sku}</div>
+                          <div style={{ fontSize: 11, color: "#64748b" }}>{item.upc || "No UPC"}</div>
                         </div>
                         <div style={{ textAlign: "right", marginLeft: 12 }}>
                           <span style={{ ...mono, fontSize: 16, fontWeight: 700, color: done ? "#22c55e" : sq > 0 ? "#f59e0b" : "#475569" }}>{sq}</span>
@@ -474,8 +617,42 @@ export default function App() {
               </div>
             )}
           </>)}
+
+          {/* Manual SKU entry for items without barcodes */}
+          {showManualAdd && currentBin && (
+            <div style={{ ...S.card, background: "rgba(245,158,11,0.04)", border: "1px solid rgba(245,158,11,0.25)" }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: "#f59e0b", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>Manual Add by SKU</div>
+              <input
+                ref={manualRef}
+                style={{ ...S.inp, fontSize: 16, ...mono }}
+                placeholder="Type SKU and press Enter..."
+                value={manualSku}
+                onChange={e => setManualSku(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter") handleManualAdd(); }}
+                onClick={e => e.stopPropagation()}
+                autoFocus
+              />
+              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                <button style={{ ...S.btnSm, flex: 1, background: "rgba(245,158,11,0.15)", color: "#f59e0b", borderColor: "rgba(245,158,11,0.3)" }} onClick={handleManualAdd}>Add</button>
+                <button style={{ ...S.btnSm, flex: 1 }} onClick={() => { setShowManualAdd(false); setManualSku(""); scanRef.current?.focus(); }}>Cancel</button>
+              </div>
+            </div>
+          )}
+
+          {error && <div style={S.err}>{error}</div>}
+
           <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
-            <button style={{ ...S.btnSec, padding: "10px 14px" }} onClick={() => setPhase("setup")}>← Setup</button>
+            <button style={{ ...S.btnSec, padding: "10px 14px", flex: 1 }} onClick={() => setPhase("setup")}>← Setup</button>
+            {currentBin && !showManualAdd && (
+              <button style={{ ...S.btnSec, padding: "10px 14px", flex: 1, color: "#f59e0b", borderColor: "rgba(245,158,11,0.3)" }}
+                onClick={(e) => { e.stopPropagation(); setShowManualAdd(true); }}>
+                No Barcode?
+              </button>
+            )}
+            <button style={{ ...S.btnSec, padding: "10px 14px", flex: 1, color: "#ef4444", borderColor: "rgba(239,68,68,0.3)" }}
+              onClick={(e) => { e.stopPropagation(); restartCount(); }}>
+              Restart
+            </button>
           </div>
         </div>
       </div>
@@ -511,10 +688,54 @@ export default function App() {
         <div style={{ padding: "10px 14px", borderRadius: 8, fontSize: 12, lineHeight: 1.5, background: "rgba(59,130,246,0.06)", border: "1px solid rgba(59,130,246,0.2)", color: "#93c5fd", marginBottom: 10 }}>
           <strong>{adjCount}</strong> item{adjCount !== 1 ? "s" : ""} need adjustment. Import via Transactions › Inventory Adjustment › <strong>Add</strong>.
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
-          <button style={S.btnSec} onClick={exportDetail}>Export Detail</button>
-          <button style={{ ...S.btn, padding: "12px 16px" }} onClick={exportNS}>NS Import CSV</button>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 6 }}>
+          <button style={S.btnSec} onClick={exportDetail}>Download Detail</button>
+          <button style={{ ...S.btn, padding: "12px 16px" }} onClick={exportNS}>Download NS CSV</button>
         </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
+          <button style={{ ...S.btnSec, background: "rgba(99,102,241,0.1)", borderColor: "rgba(99,102,241,0.3)", color: "#a5b4fc" }} onClick={() => shareCSV("detail")}>
+            Share Detail
+          </button>
+          <button style={{ ...S.btnSec, background: "rgba(99,102,241,0.1)", borderColor: "rgba(99,102,241,0.3)", color: "#a5b4fc" }} onClick={() => shareCSV("ns")}>
+            Share NS CSV
+          </button>
+        </div>
+        {emailTo && (
+          <button style={{ ...S.btnSec, marginBottom: 10, background: "rgba(34,197,94,0.08)", borderColor: "rgba(34,197,94,0.25)", color: "#86efac", textAlign: "center" }}
+            onClick={() => { setEmailType("detail"); setShowEmailModal(true); }}>
+            Email to {emailTo}
+          </button>
+        )}
+
+        {/* Email Modal */}
+        {showEmailModal && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}
+            onClick={() => setShowEmailModal(false)}>
+            <div style={{ ...S.card, maxWidth: 360, width: "100%", background: "#1e293b" }} onClick={e => e.stopPropagation()}>
+              <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 12 }}>Email CSV</div>
+              <label style={S.lbl}>To</label>
+              <select style={{ ...S.inp, marginBottom: 12, appearance: "auto" }} value={emailTo} onChange={e => setEmailTo(e.target.value)}>
+                <option value="rebecca@greatlakesworkwear.com">rebecca@greatlakesworkwear.com</option>
+                <option value="bryce@greatlakesworkwear.com">bryce@greatlakesworkwear.com</option>
+              </select>
+              <label style={S.lbl}>Which CSV?</label>
+              <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+                <button onClick={() => setEmailType("detail")}
+                  style={{ ...S.btnSm, flex: 1, background: emailType === "detail" ? "rgba(59,130,246,0.15)" : undefined, color: emailType === "detail" ? "#60a5fa" : "#94a3b8", borderColor: emailType === "detail" ? "rgba(59,130,246,0.3)" : undefined }}>
+                  Count Detail
+                </button>
+                <button onClick={() => setEmailType("ns")}
+                  style={{ ...S.btnSm, flex: 1, background: emailType === "ns" ? "rgba(59,130,246,0.15)" : undefined, color: emailType === "ns" ? "#60a5fa" : "#94a3b8", borderColor: emailType === "ns" ? "rgba(59,130,246,0.3)" : undefined }}>
+                  NS Import
+                </button>
+              </div>
+              <button style={{ ...S.btn, background: "#22c55e" }} onClick={() => emailCSV(emailType)} disabled={emailSending}>
+                {emailSending ? "Sending..." : "Send Email"}
+              </button>
+              <button style={{ ...S.btnSec, marginTop: 8 }} onClick={() => setShowEmailModal(false)}>Cancel</button>
+            </div>
+          </div>
+        )}
         <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
           <div style={{ overflowY: "auto", maxHeight: "calc(100vh - 380px)" }}>
             {filtered.map((r, i) => (
@@ -524,8 +745,8 @@ export default function App() {
                     <Badge s={r.status} />
                     {r.bin && <span style={{ fontSize: 10, color: "#818cf8", ...mono }}>{r.bin}</span>}
                   </div>
-                  <div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.itemname || r.sku}</div>
-                  <div style={{ fontSize: 10, color: "#64748b", ...mono }}>{r.sku} • {r.upc}</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, ...mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.sku || r.itemname}</div>
+                  <div style={{ fontSize: 10, color: "#64748b" }}>{r.upc || "No UPC"}</div>
                 </div>
                 <div style={{ textAlign: "right", marginLeft: 12, whiteSpace: "nowrap" }}>
                   <div style={{ fontSize: 11, color: "#94a3b8" }}><span style={mono}>{r.scanned_qty}</span> / <span style={mono}>{r.expected_qty}</span></div>
