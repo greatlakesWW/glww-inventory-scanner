@@ -76,19 +76,16 @@ const Logo = () => (
 );
 
 // ═══════════════════════════════════════════════════════════
-// MAIN APP
+// SESSION PERSISTENCE
 // ═══════════════════════════════════════════════════════════
 const SESSION_KEY = "glww_scanner_session";
-const loadSession = () => {
-  try { const raw = localStorage.getItem(SESSION_KEY); if (raw) return JSON.parse(raw); } catch (e) {} return null;
-};
-const saveSession = (data) => {
-  try { localStorage.setItem(SESSION_KEY, JSON.stringify(data)); } catch (e) {}
-};
-const clearSession = () => {
-  try { localStorage.removeItem(SESSION_KEY); } catch (e) {}
-};
+const loadSession = () => { try { const r = localStorage.getItem(SESSION_KEY); if (r) return JSON.parse(r); } catch(e) {} return null; };
+const saveSession = (d) => { try { localStorage.setItem(SESSION_KEY, JSON.stringify(d)); } catch(e) {} };
+const clearSession = () => { try { localStorage.removeItem(SESSION_KEY); } catch(e) {} };
 
+// ═══════════════════════════════════════════════════════════
+// MAIN APP
+// ═══════════════════════════════════════════════════════════
 export default function App() {
   const saved = useRef(loadSession()).current;
 
@@ -112,20 +109,12 @@ export default function App() {
   const [currentBin, setCurrentBin] = useState(saved?.currentBin || null);
   const [binHistory, setBinHistory] = useState(saved?.binHistory || []);
   const [scans, setScans] = useState(saved?.scans || {});
-  const [scanLog, setScanLog] = useState(saved?.scanLog || []);
+  const [scanLog, setScanLog] = useState(() => saved?.scanLog ? saved.scanLog.map(s => ({ ...s, time: new Date(s.time) })) : []);
   const [flash, setFlash] = useState(null);
-  const [filter, setFilter] = useState(saved?.filter || "");
+  const [filter, setFilter] = useState("");
 
   const scanRef = useRef(null);
   const binRef = useRef(null);
-
-  // ── AUTO SAVE SESSION ──
-  useEffect(() => {
-    saveSession({
-      phase, classes, locations, classPath, selectedClassId, selectedLocation,
-      adjustAcct, expected, currentBin, binHistory, scans, scanLog, filter
-    });
-  }, [phase, classes, locations, classPath, selectedClassId, selectedLocation, adjustAcct, expected, currentBin, binHistory, scans, scanLog, filter]);
 
   // ── DERIVED ──
   const upcLookup = useMemo(() => {
@@ -155,6 +144,18 @@ export default function App() {
     find(parentId);
     return ids;
   }, [classes]);
+
+  // ── AUTO-SAVE SESSION ──
+  useEffect(() => {
+    if (phase === "setup" && classes.length === 0) return;
+    saveSession({
+      phase, classes, locations, classPath, selectedClassId,
+      selectedLocation, adjustAcct, expected, currentBin,
+      binHistory, scans, scanLog, emailTo,
+    });
+  }, [phase, classes, locations, classPath, selectedClassId,
+      selectedLocation, adjustAcct, expected, currentBin,
+      binHistory, scans, scanLog, emailTo]);
 
   // ── AUTO FOCUS ──
   useEffect(() => {
@@ -259,6 +260,7 @@ export default function App() {
     setCurrentBin(null);
     setFlash(null);
     setFilter("");
+    clearSession();
   };
 
   // Manual SKU entry - find item by SKU in expected list
@@ -350,7 +352,7 @@ export default function App() {
   };
 
   // ── SHARE / EMAIL ──
-  const [emailTo, setEmailTo] = useState("");
+  const [emailTo, setEmailTo] = useState(saved?.emailTo || "");
   const [showEmailModal, setShowEmailModal] = useState(false);
   const [emailSending, setEmailSending] = useState(false);
   const [emailType, setEmailType] = useState("detail"); // "detail" | "ns"
@@ -663,7 +665,7 @@ export default function App() {
           {error && <div style={S.err}>{error}</div>}
 
           <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
-            <button style={{ ...S.btnSec, padding: "10px 14px", flex: 1 }} onClick={() => setPhase("setup")}>← Setup</button>
+            <button style={{ ...S.btnSec, padding: "10px 14px", flex: 1 }} onClick={() => { clearSession(); setPhase("setup"); }}>← Setup</button>
             {currentBin && !showManualAdd && (
               <button style={{ ...S.btnSec, padding: "10px 14px", flex: 1, color: "#f59e0b", borderColor: "rgba(245,158,11,0.3)" }}
                 onClick={(e) => { e.stopPropagation(); setShowManualAdd(true); }}>
