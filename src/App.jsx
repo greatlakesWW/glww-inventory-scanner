@@ -112,6 +112,7 @@ export default function App() {
   const [scanLog, setScanLog] = useState(() => saved?.scanLog ? saved.scanLog.map(s => ({ ...s, time: new Date(s.time) })) : []);
   const [flash, setFlash] = useState(null);
   const [filter, setFilter] = useState("");
+  const [emailTo, setEmailTo] = useState(saved?.emailTo || "");
 
   const scanRef = useRef(null);
   const binRef = useRef(null);
@@ -352,7 +353,6 @@ export default function App() {
   };
 
   // ── SHARE / EMAIL ──
-  const [emailTo, setEmailTo] = useState(saved?.emailTo || "");
   const [showEmailModal, setShowEmailModal] = useState(false);
   const [emailSending, setEmailSending] = useState(false);
   const [emailType, setEmailType] = useState("detail"); // "detail" | "ns"
