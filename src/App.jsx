@@ -208,9 +208,7 @@ export default function App() {
           item.upccode AS upc,
           ib.quantityonhand AS expected_qty,
           ib.binnumber AS bin_id,
-          BUILTIN.DF(ib.binnumber) AS bin_number,
-          ib.quantityonhand AS qty,
-          BUILTIN.DF(ib.status) AS inv_status
+          BUILTIN.DF(ib.binnumber) AS bin_number
         FROM inventorybalance ib
         JOIN item ON ib.item = item.id
         WHERE ib.location = ${selectedLocation.id}
@@ -306,7 +304,6 @@ export default function App() {
     expected.forEach(item => {
       const upc = item.upc || ""; const bin = item.bin_number || "";
       const binId = item.bin_id || "";
-      const invStatus = item.inv_status || "";
       // Check for UPC-keyed scan first, then SKU-keyed
       const upcKey = bin ? `${bin}::${upc}` : upc;
       const skuKey = bin ? `${bin}::SKU:${item.sku}` : `SKU:${item.sku}`;
@@ -314,7 +311,7 @@ export default function App() {
       const eq = Number(item.expected_qty) || 0;
       let status = "matched";
       if (sq === 0) status = "review"; else if (sq !== eq) status = "variance";
-      rows.push({ ...item, upc, bin, bin_id: binId, inv_status: invStatus, scanned_qty: sq, expected_qty: eq, status, diff: sq - eq });
+      rows.push({ ...item, upc, bin, bin_id: binId, scanned_qty: sq, expected_qty: eq, status, diff: sq - eq });
       if (upc) done.add(upcKey);
       done.add(skuKey);
     });
@@ -354,9 +351,9 @@ export default function App() {
     const d = new Date();
     const dateStr = `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
     const periodStr = d.toLocaleString("en-US", { month: "short" }) + " " + d.getFullYear();
-    const h = "External ID,Adjustment Account,Adjustment Location,Subsidiary,Date,Posting Period,Internal ID,Adjust Qty By,Location,Internal ID Bins,Status,Quantity\n";
+    const h = "External ID,Adjustment Account,Adjustment Location,Subsidiary,Date,Posting Period,Internal ID,Adjust Qty By,Location,Internal ID Bins,Quantity\n";
     const b = rows.map(r =>
-      `"${extId}","60050 Inventory Adjustment","${selectedLocation?.name}","Great Lakes Work Wear","${dateStr}","${periodStr}","${r.internalid}",${r.diff},"${selectedLocation?.name}","${r.bin_id || ""}","${r.inv_status || ""}",${r.diff}`
+      `"${extId}","60050 Inventory Adjustment","${selectedLocation?.name}","Great Lakes Work Wear","${dateStr}","${periodStr}","${r.internalid}",${r.diff},"${selectedLocation?.name}","${r.bin_id || ""}",${r.diff}`
     ).join("\n");
     dl(h + b, `ns_import_${locName}_${today()}.csv`);
   };
@@ -376,9 +373,9 @@ export default function App() {
       const d = new Date();
       const dateStr = `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
       const periodStr = d.toLocaleString("en-US", { month: "short" }) + " " + d.getFullYear();
-      const h = "External ID,Adjustment Account,Adjustment Location,Subsidiary,Date,Posting Period,Internal ID,Adjust Qty By,Location,Internal ID Bins,Status,Quantity\n";
+      const h = "External ID,Adjustment Account,Adjustment Location,Subsidiary,Date,Posting Period,Internal ID,Adjust Qty By,Location,Internal ID Bins,Quantity\n";
       const b = rows.map(r =>
-        `"${extId}","60050 Inventory Adjustment","${selectedLocation?.name}","Great Lakes Work Wear","${dateStr}","${periodStr}","${r.internalid}",${r.diff},"${selectedLocation?.name}","${r.bin_id || ""}","${r.inv_status || ""}",${r.diff}`
+        `"${extId}","60050 Inventory Adjustment","${selectedLocation?.name}","Great Lakes Work Wear","${dateStr}","${periodStr}","${r.internalid}",${r.diff},"${selectedLocation?.name}","${r.bin_id || ""}",${r.diff}`
       ).join("\n");
       content = h + b;
       filename = `ns_import_${locName}_${today()}.csv`;
