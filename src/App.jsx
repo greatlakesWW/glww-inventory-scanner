@@ -26,7 +26,7 @@ const beep = (freq, dur = 0.12, type = "sine") => {
     o.frequency.value = freq; o.type = type; g.gain.value = 0.15;
     o.start(); g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
     o.stop(ctx.currentTime + dur);
-  } catch (e) {}
+  } catch (e) { }
 };
 const beepOk = () => beep(880);
 const beepWarn = () => beep(220, 0.25, "square");
@@ -79,9 +79,9 @@ const Logo = () => (
 // SESSION PERSISTENCE
 // ═══════════════════════════════════════════════════════════
 const SESSION_KEY = "glww_scanner_session";
-const loadSession = () => { try { const r = localStorage.getItem(SESSION_KEY); if (r) return JSON.parse(r); } catch(e) {} return null; };
-const saveSession = (d) => { try { localStorage.setItem(SESSION_KEY, JSON.stringify(d)); } catch(e) {} };
-const clearSession = () => { try { localStorage.removeItem(SESSION_KEY); } catch(e) {} };
+const loadSession = () => { try { const r = localStorage.getItem(SESSION_KEY); if (r) return JSON.parse(r); } catch (e) { } return null; };
+const saveSession = (d) => { try { localStorage.setItem(SESSION_KEY, JSON.stringify(d)); } catch (e) { } };
+const clearSession = () => { try { localStorage.removeItem(SESSION_KEY); } catch (e) { } };
 
 // ═══════════════════════════════════════════════════════════
 // MAIN APP
@@ -112,6 +112,7 @@ export default function App() {
   const [scanLog, setScanLog] = useState(() => saved?.scanLog ? saved.scanLog.map(s => ({ ...s, time: new Date(s.time) })) : []);
   const [flash, setFlash] = useState(null);
   const [filter, setFilter] = useState("");
+  const [emailTo, setEmailTo] = useState(saved?.emailTo || "");
 
   const scanRef = useRef(null);
   const binRef = useRef(null);
@@ -154,8 +155,8 @@ export default function App() {
       binHistory, scans, scanLog, emailTo,
     });
   }, [phase, classes, locations, classPath, selectedClassId,
-      selectedLocation, adjustAcct, expected, currentBin,
-      binHistory, scans, scanLog, emailTo]);
+    selectedLocation, adjustAcct, expected, currentBin,
+    binHistory, scans, scanLog, emailTo]);
 
   // ── AUTO FOCUS ──
   useEffect(() => {
@@ -351,7 +352,7 @@ export default function App() {
     const locName = (selectedLocation?.name || "location").replace(/\s+/g, "_");
     const extId = `ADJ_${locName}_${today()}`;
     const d = new Date();
-    const dateStr = `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}`;
+    const dateStr = `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
     const periodStr = d.toLocaleString("en-US", { month: "short" }) + " " + d.getFullYear();
     const h = "External ID,Adjustment Account,Adjustment Location,Subsidiary,Date,Posting Period,Internal ID,Adjust Qty By,Location,Internal ID Bins,Status,Quantity\n";
     const b = rows.map(r =>
@@ -361,7 +362,6 @@ export default function App() {
   };
 
   // ── SHARE / EMAIL ──
-  const [emailTo, setEmailTo] = useState(saved?.emailTo || "");
   const [showEmailModal, setShowEmailModal] = useState(false);
   const [emailSending, setEmailSending] = useState(false);
   const [emailType, setEmailType] = useState("detail"); // "detail" | "ns"
@@ -374,7 +374,7 @@ export default function App() {
     if (type === "ns") {
       const extId = `ADJ_${locName}_${today()}`;
       const d = new Date();
-      const dateStr = `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}`;
+      const dateStr = `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
       const periodStr = d.toLocaleString("en-US", { month: "short" }) + " " + d.getFullYear();
       const h = "External ID,Adjustment Account,Adjustment Location,Subsidiary,Date,Posting Period,Internal ID,Adjust Qty By,Location,Internal ID Bins,Status,Quantity\n";
       const b = rows.map(r =>
