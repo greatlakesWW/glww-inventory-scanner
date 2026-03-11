@@ -112,7 +112,6 @@ export default function App() {
   const [scanLog, setScanLog] = useState(() => saved?.scanLog ? saved.scanLog.map(s => ({ ...s, time: new Date(s.time) })) : []);
   const [flash, setFlash] = useState(null);
   const [filter, setFilter] = useState("");
-  const [emailTo, setEmailTo] = useState(saved?.emailTo || "");
 
   const scanRef = useRef(null);
   const binRef = useRef(null);
@@ -207,7 +206,10 @@ export default function App() {
           item.displayname AS itemname,
           item.upccode AS upc,
           ib.quantityonhand AS expected_qty,
-          BUILTIN.DF(ib.binnumber) AS bin_number
+          ib.binnumber AS bin_id,
+          BUILTIN.DF(ib.binnumber) AS bin_number,
+          ib.quantityonhand AS qty,
+          BUILTIN.DF(ib.status) AS inv_status
         FROM inventorybalance ib
         JOIN item ON ib.item = item.id
         WHERE ib.location = ${selectedLocation.id}
@@ -302,6 +304,8 @@ export default function App() {
     const rows = []; const done = new Set();
     expected.forEach(item => {
       const upc = item.upc || ""; const bin = item.bin_number || "";
+      const binId = item.bin_id || "";
+      const invStatus = item.inv_status || "";
       // Check for UPC-keyed scan first, then SKU-keyed
       const upcKey = bin ? `${bin}::${upc}` : upc;
       const skuKey = bin ? `${bin}::SKU:${item.sku}` : `SKU:${item.sku}`;
@@ -309,7 +313,7 @@ export default function App() {
       const eq = Number(item.expected_qty) || 0;
       let status = "matched";
       if (sq === 0) status = "review"; else if (sq !== eq) status = "variance";
-      rows.push({ ...item, upc, bin, scanned_qty: sq, expected_qty: eq, status, diff: sq - eq });
+      rows.push({ ...item, upc, bin, bin_id: binId, inv_status: invStatus, scanned_qty: sq, expected_qty: eq, status, diff: sq - eq });
       if (upc) done.add(upcKey);
       done.add(skuKey);
     });
@@ -336,8 +340,8 @@ export default function App() {
 
   const exportDetail = () => {
     const rows = getComparison();
-    const h = "Internal ID,SKU,Item Name,UPC,Bin,Expected Qty,Scanned Qty,Difference,Status\n";
-    const b = rows.map(r => `"${r.internalid}","${r.sku}","${(r.itemname || "").replace(/"/g, '""')}","${r.upc}","${r.bin}",${r.expected_qty},${r.scanned_qty},${r.diff},"${ST[r.status].l}"`).join("\n");
+    const h = "Internal ID,SKU,Item Name,UPC,Bin,Bin ID,Expected Qty,Scanned Qty,Difference,Status\n";
+    const b = rows.map(r => `"${r.internalid}","${r.sku}","${(r.itemname || "").replace(/"/g, '""')}","${r.upc}","${r.bin}","${r.bin_id || ""}",${r.expected_qty},${r.scanned_qty},${r.diff},"${ST[r.status].l}"`).join("\n");
     dl(h + b, `count_detail_${(selectedLocation?.name || "").replace(/\s+/g, "_")}_${today()}.csv`);
   };
 
@@ -346,13 +350,18 @@ export default function App() {
     if (rows.length === 0) { setError("All counts match. No adjustments needed."); return; }
     const locName = (selectedLocation?.name || "location").replace(/\s+/g, "_");
     const extId = `ADJ_${locName}_${today()}`;
-    const acct = adjustAcct || "Inventory Adjustments";
-    const h = "External ID,Adjustment Account,Adjustment Location,Item,Adjustment: Adjust Qty By,Adjustment: Bin Number,Inventory Detail: Quantity,Inventory Detail: Bin Number\n";
-    const b = rows.map(r => `"${extId}","${acct}","${selectedLocation?.name}","${r.sku || r.internalid}",${r.diff},"${r.bin}",${r.diff},"${r.bin}"`).join("\n");
+    const d = new Date();
+    const dateStr = `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}`;
+    const periodStr = d.toLocaleString("en-US", { month: "short" }) + " " + d.getFullYear();
+    const h = "External ID,Adjustment Account,Adjustment Location,Subsidiary,Date,Posting Period,Internal ID,Adjust Qty By,Location,Internal ID Bins,Status,Quantity\n";
+    const b = rows.map(r =>
+      `"${extId}","60050 Inventory Adjustment","${selectedLocation?.name}","Great Lakes Work Wear","${dateStr}","${periodStr}","${r.internalid}",${r.diff},"${selectedLocation?.name}","${r.bin_id || ""}","${r.inv_status || ""}",${r.diff}`
+    ).join("\n");
     dl(h + b, `ns_import_${locName}_${today()}.csv`);
   };
 
   // ── SHARE / EMAIL ──
+  const [emailTo, setEmailTo] = useState(saved?.emailTo || "");
   const [showEmailModal, setShowEmailModal] = useState(false);
   const [emailSending, setEmailSending] = useState(false);
   const [emailType, setEmailType] = useState("detail"); // "detail" | "ns"
@@ -364,14 +373,18 @@ export default function App() {
     let content, filename;
     if (type === "ns") {
       const extId = `ADJ_${locName}_${today()}`;
-      const acct = adjustAcct || "Inventory Adjustments";
-      const h = "External ID,Adjustment Account,Adjustment Location,Item,Adjustment: Adjust Qty By,Adjustment: Bin Number,Inventory Detail: Quantity,Inventory Detail: Bin Number\n";
-      const b = rows.map(r => `"${extId}","${acct}","${selectedLocation?.name}","${r.sku || r.internalid}",${r.diff},"${r.bin}",${r.diff},"${r.bin}"`).join("\n");
+      const d = new Date();
+      const dateStr = `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}`;
+      const periodStr = d.toLocaleString("en-US", { month: "short" }) + " " + d.getFullYear();
+      const h = "External ID,Adjustment Account,Adjustment Location,Subsidiary,Date,Posting Period,Internal ID,Adjust Qty By,Location,Internal ID Bins,Status,Quantity\n";
+      const b = rows.map(r =>
+        `"${extId}","60050 Inventory Adjustment","${selectedLocation?.name}","Great Lakes Work Wear","${dateStr}","${periodStr}","${r.internalid}",${r.diff},"${selectedLocation?.name}","${r.bin_id || ""}","${r.inv_status || ""}",${r.diff}`
+      ).join("\n");
       content = h + b;
       filename = `ns_import_${locName}_${today()}.csv`;
     } else {
-      const h = "Internal ID,SKU,Item Name,UPC,Bin,Expected Qty,Scanned Qty,Difference,Status\n";
-      const b = rows.map(r => `"${r.internalid}","${r.sku}","${(r.itemname || "").replace(/"/g, '""')}","${r.upc}","${r.bin}",${r.expected_qty},${r.scanned_qty},${r.diff},"${ST[r.status].l}"`).join("\n");
+      const h = "Internal ID,SKU,Item Name,UPC,Bin,Bin ID,Expected Qty,Scanned Qty,Difference,Status\n";
+      const b = rows.map(r => `"${r.internalid}","${r.sku}","${(r.itemname || "").replace(/"/g, '""')}","${r.upc}","${r.bin}","${r.bin_id || ""}",${r.expected_qty},${r.scanned_qty},${r.diff},"${ST[r.status].l}"`).join("\n");
       content = h + b;
       filename = `count_detail_${locName}_${today()}.csv`;
     }
