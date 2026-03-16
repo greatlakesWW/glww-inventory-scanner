@@ -56,7 +56,7 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Missing NetSuite credentials." });
   }
 
-  const { locationId, locationName, items, memo } = req.body;
+  const { locationId, locationName, items, memo, binMap } = req.body;
   if (!locationId || !items || items.length === 0) {
     return res.status(400).json({ error: "Missing locationId or items" });
   }
@@ -66,26 +66,34 @@ export default async function handler(req, res) {
     const subsidiaryId = "2";    // Great Lakes Work Wear
     const accountIdVal = "452";  // 60050 Inventory Adjustment
 
-    // Step 1: Look up bin IDs for any items missing bin_id but having bin_name
-    const binNamesNeeded = [...new Set(items.filter(i => !i.bin_id && i.bin_name).map(i => i.bin_name))];
-    const binNameToId = {};
+    // Use binMap from frontend (built from expected data)
+    const frontendBinMap = binMap || {};
+
+    // Step 1: For any remaining bins without IDs, look up via SuiteQL
+    const binNamesNeeded = [...new Set(
+      items.filter(i => !i.bin_id && i.bin_name && !frontendBinMap[i.bin_name]).map(i => i.bin_name)
+    )];
+    const lookedUpBins = {};
 
     if (binNamesNeeded.length > 0) {
       console.log("Looking up bin IDs for:", binNamesNeeded);
       const escaped = binNamesNeeded.map(n => `'${n.replace(/'/g, "''")}'`).join(",");
       const binRows = await runSuiteQL(config,
-        `SELECT id, binnumber FROM bin WHERE location = ${locationId} AND binnumber IN (${escaped})`
+        `SELECT id, binnumber FROM Bin WHERE location = ${locationId} AND binnumber IN (${escaped})`
       );
-      binRows.forEach(r => { binNameToId[r.binnumber] = r.id; });
-      console.log("Bin lookup results:", binNameToId);
+      binRows.forEach(r => { lookedUpBins[r.binnumber] = r.id; });
+      console.log("Bin lookup results:", lookedUpBins);
     }
+
+    console.log("Frontend binMap keys:", Object.keys(frontendBinMap).slice(0, 10));
+    console.log("Items to process:", items.map(i => ({ id: i.internalid, bin_id: i.bin_id, bin_name: i.bin_name })));
 
     // Step 2: Build adjustment payload — ALWAYS include inventory detail
     const adjustmentItems = [];
     const errors = [];
 
     items.forEach((item, idx) => {
-      const binId = item.bin_id || binNameToId[item.bin_name] || null;
+      const binId = item.bin_id || frontendBinMap[item.bin_name] || lookedUpBins[item.bin_name] || null;
 
       if (!binId) {
         errors.push(`Line ${idx + 1}: Item ${item.internalid} has no bin assigned (bin_name: ${item.bin_name || "none"})`);

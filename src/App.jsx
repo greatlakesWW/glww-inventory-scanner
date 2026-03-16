@@ -463,6 +463,11 @@ export default function App() {
           subsidiary: "Great Lakes Work Wear",
           memo: `Count: ${classPath.map(c => c.name).join(" > ")} @ ${selectedLocation.name} (${today()})`,
           items: rows.map(r => ({ internalid: r.internalid, diff: r.diff, bin_id: r.bin_id || null, bin_name: r.bin || null })),
+          binMap: (() => {
+            const m = {};
+            expected.forEach(i => { if (i.bin_number && i.bin_id) m[i.bin_number] = i.bin_id; });
+            return m;
+          })(),
         }),
       });
       const data = await resp.json();
