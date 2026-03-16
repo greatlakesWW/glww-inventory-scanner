@@ -234,12 +234,12 @@ export default function App() {
       setExpected(items);
       if (items.length === 0) setError("No inventory found for this class/location.");
 
-      // Pull ALL bin name→ID mappings (from all locations — bins can be shared)
+      // Pull ALL bin name→ID mappings via ItemBinQuantity (works for empty bins too)
       setLoadMsg("Loading bins...");
       const binRows = await suiteql(`
-        SELECT DISTINCT ib.binnumber AS bin_id, BUILTIN.DF(ib.binnumber) AS bin_name
-        FROM inventorybalance ib
-        WHERE ib.binnumber IS NOT NULL
+        SELECT DISTINCT Bin AS bin_id, BUILTIN.DF(Bin) AS bin_name
+        FROM ItemBinQuantity
+        WHERE Bin IS NOT NULL
       `);
       const bMap = {};
       binRows.forEach(r => { if (r.bin_name && r.bin_id) bMap[r.bin_name] = r.bin_id; });

@@ -69,35 +69,20 @@ export default async function handler(req, res) {
     // Use binMap from frontend (built from expected data)
     const frontendBinMap = binMap || {};
 
-    // Step 1: For any remaining bins without IDs, look up via REST record API
+    // Step 1: For any remaining bins without IDs, look up via ItemBinQuantity
     const binNamesNeeded = [...new Set(
       items.filter(i => !i.bin_id && i.bin_name && !frontendBinMap[i.bin_name]).map(i => i.bin_name)
     )];
     const lookedUpBins = {};
 
     for (const binName of binNamesNeeded) {
-      console.log("Looking up bin ID via REST for:", binName);
-      try {
-        const searchBase = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/bin`;
-        const qParam = `binNumber IS "${binName}"`;
-        const fullBinUrl = `${searchBase}?q=${encodeURIComponent(qParam)}&limit=1`;
-        const binAuth = generateOAuthHeader("GET", searchBase, { q: qParam, limit: "1" }, config);
-        const binResp = await fetch(fullBinUrl, {
-          method: "GET",
-          headers: { Authorization: binAuth },
-        });
-        if (binResp.ok) {
-          const binData = await binResp.json();
-          if (binData.items && binData.items.length > 0) {
-            lookedUpBins[binName] = String(binData.items[0].id);
-            console.log("Found bin via REST:", binName, "->", binData.items[0].id);
-          }
-        } else {
-          const errText = await binResp.text();
-          console.log("REST bin lookup failed:", binResp.status, errText.slice(0, 200));
-        }
-      } catch (e) {
-        console.log("REST bin lookup error:", e.message);
+      console.log("Looking up bin ID for:", binName);
+      const rows = await runSuiteQL(config,
+        `SELECT DISTINCT Bin AS bin_id FROM ItemBinQuantity WHERE BUILTIN.DF(Bin) = '${binName.replace(/'/g, "''")}' FETCH FIRST 1 ROWS ONLY`
+      );
+      if (rows[0]?.bin_id) {
+        lookedUpBins[binName] = String(rows[0].bin_id);
+        console.log("Found bin ID:", binName, "->", rows[0].bin_id);
       }
     }
 
