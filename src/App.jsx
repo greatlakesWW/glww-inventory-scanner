@@ -14,6 +14,33 @@ const suiteql = async (query, limit = 1000) => {
   return data.items || [];
 };
 
+// Paginated version — fetches ALL rows across multiple pages
+const suiteqlAll = async (query, onProgress) => {
+  const PAGE = 1000;
+  let offset = 0;
+  let allItems = [];
+  let hasMore = true;
+
+  while (hasMore) {
+    const resp = await fetch("/api/suiteql", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, limit: PAGE, offset }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `API error ${resp.status}`);
+
+    const items = data.items || [];
+    allItems = allItems.concat(items);
+    hasMore = data.hasMore === true && items.length > 0;
+    offset += items.length;
+
+    if (onProgress) onProgress(allItems.length, data.totalResults);
+    if (offset > 50000) break; // safety limit
+  }
+  return allItems;
+};
+
 // ═══════════════════════════════════════════════════════════
 // AUDIO
 // ═══════════════════════════════════════════════════════════
@@ -220,9 +247,13 @@ export default function App() {
     if (!selectedClassId) { setError("Select a class first."); return; }
     if (!selectedLocation) { setError("Select a location first."); return; }
     setLoading(true); setError(null); setLoadMsg("Pulling inventory...");
-    const classIds = getChildClassIds(selectedClassId).join(",");
+
+    const classFilter = selectedClassId === "ALL"
+      ? ""
+      : `AND item.class IN (${getChildClassIds(selectedClassId).join(",")})`;
+
     try {
-      const items = await suiteql(`
+      const items = await suiteqlAll(`
         SELECT
           item.id AS internalid,
           item.externalid AS externalid,
@@ -235,20 +266,20 @@ export default function App() {
         FROM inventorybalance ib
         JOIN item ON ib.item = item.id
         WHERE ib.location = ${selectedLocation.id}
-          AND item.class IN (${classIds})
+          ${classFilter}
           AND ib.quantityonhand > 0
         ORDER BY BUILTIN.DF(ib.binnumber), item.itemid
-      `);
+      `, (loaded, total) => setLoadMsg(`Pulling inventory... ${loaded}${total ? ` / ${total}` : ""} items`));
       setExpected(items);
       if (items.length === 0) setError("No inventory found for this class/location.");
 
       // Pull ALL bin name→ID mappings via ItemBinQuantity (works for empty bins too)
       setLoadMsg("Loading bins...");
-      const binRows = await suiteql(`
+      const binRows = await suiteqlAll(`
         SELECT DISTINCT Bin AS bin_id, BUILTIN.DF(Bin) AS bin_name
         FROM ItemBinQuantity
         WHERE Bin IS NOT NULL
-      `);
+      `, (loaded) => setLoadMsg(`Loading bins... ${loaded}`));
       const bMap = {};
       binRows.forEach(r => { if (r.bin_name && r.bin_id) bMap[r.bin_name] = r.bin_id; });
       setLocationBinMap(bMap);
@@ -786,6 +817,11 @@ export default function App() {
                 </div>
               )}
               <div style={{ maxHeight: 200, overflowY: "auto", borderRadius: 8, border: "1px solid rgba(255,255,255,0.06)" }}>
+                {/* All Classes option */}
+                <button onClick={() => { setSelectedClassId("ALL"); setClassPath([{ id: "ALL", name: "All Classes" }]); }}
+                  style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", padding: "14px 16px", border: "none", borderBottom: "1px solid rgba(255,255,255,0.08)", background: selectedClassId === "ALL" ? "rgba(34,197,94,0.08)" : "rgba(255,255,255,0.02)", color: selectedClassId === "ALL" ? "#22c55e" : "#86efac", fontSize: 14, fontWeight: 600, fontFamily: "inherit", textAlign: "left", cursor: "pointer", minHeight: 48 }}>
+                  <span>All Classes</span>
+                </button>
                 {currentLevelClasses.length === 0 ? (
                   <div style={{ padding: 16, textAlign: "center", color: "#475569", fontSize: 13 }}>{classPath.length > 0 ? "No sub-classes. Ready to go." : "No classes found."}</div>
                 ) : currentLevelClasses.map(c => {
@@ -800,7 +836,7 @@ export default function App() {
                   );
                 })}
               </div>
-              {selectedClassId && <div style={{ marginTop: 8, fontSize: 12, color: "#60a5fa", ...mono }}>✓ {classPath.map(c => c.name).join(" > ")}</div>}
+              {selectedClassId && <div style={{ marginTop: 8, fontSize: 12, color: selectedClassId === "ALL" ? "#22c55e" : "#60a5fa", ...mono }}>✓ {classPath.map(c => c.name).join(" > ")}</div>}
             </div>
           )}
           {locations.length > 0 && (
