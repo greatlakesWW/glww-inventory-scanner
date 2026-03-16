@@ -97,7 +97,12 @@ export default async function handler(req, res) {
       const binId = item.bin_id || frontendBinMap[item.bin_name] || lookedUpBins[item.bin_name] || null;
 
       if (!binId) {
-        errors.push(`Line ${idx + 1}: Item ${item.internalid} has no bin assigned (bin_name: ${item.bin_name || "none"})`);
+        errors.push(`Line ${idx + 1}: Item ${item.internalid || "unknown"} has no bin assigned (bin_name: ${item.bin_name || "none"})`);
+        return;
+      }
+
+      if (!item.internalid) {
+        errors.push(`Line ${idx + 1}: Unknown item with no NetSuite ID (bin: ${item.bin_name || "none"}). Skipped.`);
         return;
       }
 
@@ -105,7 +110,7 @@ export default async function handler(req, res) {
         item: { id: String(item.internalid) },
         adjustQtyBy: Number(item.diff),
         location: { id: String(locationId) },
-        line: idx + 1,
+        line: adjustmentItems.length + 1,
         inventoryDetail: {
           inventoryAssignment: {
             items: [{

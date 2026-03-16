@@ -31,6 +31,7 @@ const beep = (freq, dur = 0.12, type = "sine") => {
 const beepOk = () => beep(880);
 const beepWarn = () => beep(220, 0.25, "square");
 const beepBin = () => { beep(440); setTimeout(() => beep(660), 100); };
+const beepExtra = () => { beep(330, 0.15, "square"); setTimeout(() => beep(330, 0.15, "square"), 200); setTimeout(() => beep(330, 0.15, "square"), 400); };
 
 // ═══════════════════════════════════════════════════════════
 // STATUS
@@ -262,15 +263,36 @@ export default function App() {
     setTimeout(() => { setFlash(null); scanRef.current?.focus(); }, 400);
   };
 
+  const [extraAlert, setExtraAlert] = useState(null); // {sku, upc, bin} for extra item popup
+
   const handleItemScan = useCallback((upc) => {
     const trimmed = upc.trim(); if (!trimmed) return;
     const key = currentBin ? `${currentBin}::${trimmed}` : trimmed;
     const match = upcLookup[trimmed];
     setScans(p => ({ ...p, [key]: (p[key] || 0) + 1 }));
     setScanLog(p => [{ upc: trimmed, bin: currentBin, time: new Date(), itemname: match?.itemname || null, sku: match?.sku || null }, ...p]);
-    if (match) { beepOk(); setFlash("ok"); } else { beepWarn(); setFlash("warn"); }
+
+    if (!match) {
+      // UPC not recognized at all
+      beepWarn(); setFlash("warn");
+    } else {
+      // UPC recognized — check if expected in this bin
+      const isExpectedInBin = currentBin && binExpected.some(i => i.upc === trimmed);
+      const prefixSet = selectedPrefixes ? new Set(selectedPrefixes.map(p => p.toUpperCase())) : null;
+      const isInSelectedPrefixes = !prefixSet || prefixSet.has(getSkuPrefix(match.sku));
+
+      if (isExpectedInBin && isInSelectedPrefixes) {
+        // Normal expected item
+        beepOk(); setFlash("ok");
+      } else {
+        // Recognized but EXTRA — not expected in this bin or class
+        beepExtra(); setFlash("extra");
+        setExtraAlert({ sku: match.sku, upc: trimmed, bin: currentBin });
+        setTimeout(() => setExtraAlert(null), 4000);
+      }
+    }
     setTimeout(() => setFlash(null), 400);
-  }, [upcLookup, currentBin]);
+  }, [upcLookup, currentBin, binExpected, selectedPrefixes]);
 
   const undoLast = () => {
     if (scanLog.length === 0) return;
@@ -693,7 +715,7 @@ export default function App() {
   // RENDER: SCANNING
   // ═══════════════════════════════════════════════════════════
   if (phase === "scanning") {
-    const fb = flash === "ok" ? "rgba(34,197,94,0.5)" : flash === "warn" ? "rgba(245,158,11,0.5)" : flash === "bin" ? "rgba(99,102,241,0.5)" : "rgba(255,255,255,0.06)";
+    const fb = flash === "ok" ? "rgba(34,197,94,0.5)" : flash === "warn" ? "rgba(245,158,11,0.5)" : flash === "extra" ? "rgba(167,139,250,0.6)" : flash === "bin" ? "rgba(99,102,241,0.5)" : "rgba(255,255,255,0.06)";
     const binScans = {};
     if (currentBin) Object.entries(scans).forEach(([k, v]) => { if (k.startsWith(`${currentBin}::`)) binScans[k.split("::")[1]] = v; });
     const binItemsTotal = binExpected.reduce((a, i) => a + (Number(i.expected_qty) || 0), 0);
@@ -741,14 +763,28 @@ export default function App() {
                 <button style={{ ...S.btnSm, marginTop: 4, fontSize: 11, padding: "4px 12px" }} onClick={switchBin}>Switch Bin</button>
               </div>
             </div>
-            <div style={{ ...S.card, border: `2px solid ${fb}`, transition: "all 0.2s", background: flash === "ok" ? "rgba(34,197,94,0.04)" : flash === "warn" ? "rgba(245,158,11,0.04)" : "transparent", textAlign: "center", padding: 16 }}>
-              <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.8, fontWeight: 700, marginBottom: 8, transition: "color 0.2s", color: flash === "ok" ? "#22c55e" : flash === "warn" ? "#f59e0b" : "#94a3b8" }}>
-                {flash === "ok" ? "✓ Recognized" : flash === "warn" ? "⚠ Unknown UPC" : "Scan Items"}
+            <div style={{ ...S.card, border: `2px solid ${fb}`, transition: "all 0.2s", background: flash === "ok" ? "rgba(34,197,94,0.04)" : flash === "warn" ? "rgba(245,158,11,0.04)" : flash === "extra" ? "rgba(167,139,250,0.06)" : "transparent", textAlign: "center", padding: 16 }}>
+              <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.8, fontWeight: 700, marginBottom: 8, transition: "color 0.2s", color: flash === "ok" ? "#22c55e" : flash === "warn" ? "#f59e0b" : flash === "extra" ? "#a78bfa" : "#94a3b8" }}>
+                {flash === "ok" ? "✓ Recognized" : flash === "warn" ? "⚠ Unknown UPC" : flash === "extra" ? "⚠ EXTRA — Not Expected" : "Scan Items"}
               </div>
               <input ref={scanRef} style={{ ...S.inp, fontSize: 20, textAlign: "center", ...mono }} placeholder="Scan item..." autoFocus onKeyDown={e => { if (e.key === "Enter") { handleItemScan(e.target.value); e.target.value = ""; } }} />
               {scanLog.length > 0 && <div style={{ marginTop: 6, fontSize: 11, color: "#64748b" }}>Last: <span style={mono}>{scanLog[0]?.upc}</span>{scanLog[0]?.sku && <span> — {scanLog[0].sku}</span>}</div>}
               <button style={{ ...S.btnSm, marginTop: 8, fontSize: 11 }} onClick={undoLast} disabled={scanLog.length === 0}>Undo Last</button>
             </div>
+            {/* EXTRA item alert */}
+            {extraAlert && (
+              <div style={{
+                ...S.card, padding: "12px 16px", marginBottom: 8,
+                background: "rgba(167,139,250,0.1)", border: "2px solid rgba(167,139,250,0.5)",
+                textAlign: "center", animation: "none",
+              }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: "#a78bfa", marginBottom: 4 }}>⚠ EXTRA ITEM</div>
+                <div style={{ fontSize: 13, color: "#e2e8f0" }}>
+                  <span style={{ ...mono, fontWeight: 600 }}>{extraAlert.sku}</span> is not expected in bin <span style={{ ...mono, color: "#818cf8" }}>{extraAlert.bin}</span>
+                </div>
+                <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 4 }}>Item was added to count. Review before submitting.</div>
+              </div>
+            )}
             {binExpected.length > 0 && (
               <div style={{ ...S.card, padding: 0 }}>
                 <div style={{ padding: "10px 14px", borderBottom: "1px solid rgba(255,255,255,0.06)", fontSize: 11, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: 0.5 }}>Expected in {currentBin} ({binExpected.length} items)</div>
