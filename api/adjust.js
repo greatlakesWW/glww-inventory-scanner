@@ -67,23 +67,9 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Step 1: Look up subsidiary and account internal IDs
-    console.log("Looking up subsidiary and account IDs...");
-
-    const subRows = await runSuiteQL(config, "SELECT id, name FROM subsidiary WHERE name = 'Great Lakes Work Wear'");
-    const acctRows = await runSuiteQL(config, "SELECT id, accountsearchdisplayname FROM account WHERE accountsearchdisplayname LIKE '%60050%Inventory Adjustment%' OR number = '60050'");
-
-    const subsidiaryId = subRows[0]?.id;
-    const accountIdVal = acctRows[0]?.id;
-
-    console.log("Subsidiary ID:", subsidiaryId, "Account ID:", accountIdVal);
-
-    if (!subsidiaryId) {
-      return res.status(400).json({ error: "Could not find subsidiary 'Great Lakes Work Wear'. Check NetSuite." });
-    }
-    if (!accountIdVal) {
-      return res.status(400).json({ error: "Could not find account '60050 Inventory Adjustment'. Check NetSuite." });
-    }
+    // Hardcoded GLWW IDs
+    const subsidiaryId = "2";    // Great Lakes Work Wear
+    const accountIdVal = "452";  // 60050 Inventory Adjustment
 
     // Step 2: Build the inventory adjustment payload with internal IDs
     const adjustmentBody = {
