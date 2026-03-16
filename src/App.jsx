@@ -462,7 +462,7 @@ export default function App() {
           locationName: selectedLocation.name,
           subsidiary: "Great Lakes Work Wear",
           memo: `Count: ${classPath.map(c => c.name).join(" > ")} @ ${selectedLocation.name} (${today()})`,
-          items: rows.map(r => ({ internalid: r.internalid, diff: r.diff, bin_id: r.bin_id || null })),
+          items: rows.map(r => ({ internalid: r.internalid, diff: r.diff, bin_id: r.bin_id || null, bin_name: r.bin || null })),
         }),
       });
       const data = await resp.json();

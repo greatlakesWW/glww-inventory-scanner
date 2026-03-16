@@ -12,12 +12,9 @@ function generateOAuthHeader(method, baseUrl, queryParams, config) {
   const nonce = crypto.randomBytes(16).toString("hex");
   const timestamp = Math.floor(Date.now() / 1000).toString();
   const oauthParams = {
-    oauth_consumer_key: config.consumerKey,
-    oauth_nonce: nonce,
-    oauth_signature_method: "HMAC-SHA256",
-    oauth_timestamp: timestamp,
-    oauth_token: config.tokenId,
-    oauth_version: "1.0",
+    oauth_consumer_key: config.consumerKey, oauth_nonce: nonce,
+    oauth_signature_method: "HMAC-SHA256", oauth_timestamp: timestamp,
+    oauth_token: config.tokenId, oauth_version: "1.0",
   };
   const allParams = { ...oauthParams, ...queryParams };
   const sortedParams = Object.keys(allParams).sort().map(k => `${enc(k)}=${enc(String(allParams[k]))}`).join("&");
@@ -32,12 +29,11 @@ function enc(str) {
   return encodeURIComponent(str).replace(/[!'()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
-// Helper to run SuiteQL and get IDs
 async function runSuiteQL(config, query) {
   const baseUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/query/v1/suiteql`;
-  const qp = { limit: "10", offset: "0" };
+  const qp = { limit: "1000", offset: "0" };
   const authHeader = generateOAuthHeader("POST", baseUrl, qp, config);
-  const resp = await fetch(`${baseUrl}?limit=10&offset=0`, {
+  const resp = await fetch(`${baseUrl}?limit=1000&offset=0`, {
     method: "POST",
     headers: { Authorization: authHeader, "Content-Type": "application/json", Prefer: "transient" },
     body: JSON.stringify({ q: query }),
@@ -61,7 +57,6 @@ export default async function handler(req, res) {
   }
 
   const { locationId, locationName, items, memo } = req.body;
-
   if (!locationId || !items || items.length === 0) {
     return res.status(400).json({ error: "Missing locationId or items" });
   }
@@ -71,40 +66,67 @@ export default async function handler(req, res) {
     const subsidiaryId = "2";    // Great Lakes Work Wear
     const accountIdVal = "452";  // 60050 Inventory Adjustment
 
-    // Step 2: Build the inventory adjustment payload with internal IDs
+    // Step 1: Look up bin IDs for any items missing bin_id but having bin_name
+    const binNamesNeeded = [...new Set(items.filter(i => !i.bin_id && i.bin_name).map(i => i.bin_name))];
+    const binNameToId = {};
+
+    if (binNamesNeeded.length > 0) {
+      console.log("Looking up bin IDs for:", binNamesNeeded);
+      const escaped = binNamesNeeded.map(n => `'${n.replace(/'/g, "''")}'`).join(",");
+      const binRows = await runSuiteQL(config,
+        `SELECT id, binnumber FROM bin WHERE location = ${locationId} AND binnumber IN (${escaped})`
+      );
+      binRows.forEach(r => { binNameToId[r.binnumber] = r.id; });
+      console.log("Bin lookup results:", binNameToId);
+    }
+
+    // Step 2: Build adjustment payload — ALWAYS include inventory detail
+    const adjustmentItems = [];
+    const errors = [];
+
+    items.forEach((item, idx) => {
+      const binId = item.bin_id || binNameToId[item.bin_name] || null;
+
+      if (!binId) {
+        errors.push(`Line ${idx + 1}: Item ${item.internalid} has no bin assigned (bin_name: ${item.bin_name || "none"})`);
+        return;
+      }
+
+      adjustmentItems.push({
+        item: { id: String(item.internalid) },
+        adjustQtyBy: Number(item.diff),
+        location: { id: String(locationId) },
+        line: idx + 1,
+        inventoryDetail: {
+          inventoryAssignment: {
+            items: [{
+              binNumber: { id: String(binId) },
+              quantity: Number(item.diff),
+            }],
+          },
+        },
+      });
+    });
+
+    if (errors.length > 0 && adjustmentItems.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "No items could be submitted — all are missing bin assignments.",
+        details: errors,
+      });
+    }
+
     const adjustmentBody = {
-      subsidiary: { id: String(subsidiaryId) },
-      account: { id: String(accountIdVal) },
+      subsidiary: { id: subsidiaryId },
+      account: { id: accountIdVal },
       adjLocation: { id: String(locationId) },
       memo: memo || `Inventory Count - ${locationName || "Unknown"} - ${new Date().toISOString().slice(0, 10)}`,
-      inventory: {
-        items: items.map((item, idx) => {
-          const line = {
-            item: { id: String(item.internalid) },
-            adjustQtyBy: Number(item.diff),
-            location: { id: String(locationId) },
-            line: idx + 1,
-          };
-
-          if (item.bin_id) {
-            line.inventoryDetail = {
-              inventoryAssignment: {
-                items: [{
-                  binNumber: { id: String(item.bin_id) },
-                  quantity: Number(item.diff),
-                }],
-              },
-            };
-          }
-
-          return line;
-        }),
-      },
+      inventory: { items: adjustmentItems },
     };
 
-    console.log("Submitting adjustment:", JSON.stringify(adjustmentBody).slice(0, 500));
+    console.log("Submitting adjustment:", JSON.stringify(adjustmentBody).slice(0, 1000));
 
-    // Step 3: Create the inventory adjustment
+    // Step 3: Create the inventory adjustment (synchronous)
     const baseUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/inventoryadjustment`;
     const authHeader = generateOAuthHeader("POST", baseUrl, {}, config);
 
@@ -117,7 +139,6 @@ export default async function handler(req, res) {
       body: JSON.stringify(adjustmentBody),
     });
 
-    // Read response body first
     let responseBody = null;
     const responseText = await nsResponse.text();
     try { responseBody = JSON.parse(responseText); } catch (e) { responseBody = responseText; }
@@ -128,7 +149,7 @@ export default async function handler(req, res) {
 
     console.log("NetSuite response:", nsResponse.status, "Location:", locationHeader, "Body:", responseText.slice(0, 500));
 
-    // Handle success statuses
+    // Success
     if (nsResponse.status === 204 || nsResponse.status === 201 || nsResponse.status === 200) {
       const recordUrl = recordId
         ? `https://${config.accountId}.app.netsuite.com/app/accounting/transactions/invadjst.nl?id=${recordId}`
@@ -136,26 +157,27 @@ export default async function handler(req, res) {
       return res.status(200).json({
         success: true, recordId, recordUrl,
         message: `Inventory adjustment created${recordId ? ` (ID: ${recordId})` : ""}.`,
+        warnings: errors.length > 0 ? errors : undefined,
       });
     }
 
+    // 202 = async, unreliable
     if (nsResponse.status === 202) {
-      // Async — return whatever info we have plus the response body
       return res.status(200).json({
         success: false,
-        error: `NetSuite returned 202 (async). The adjustment may not have been created.`,
+        error: "NetSuite returned 202 (async processing). The adjustment may not have been created. Check Transactions → Inventory → Adjust Inventory → List.",
         details: responseBody,
       });
     }
 
-    // Handle errors
+    // Error
     console.error("NetSuite adjust error:", nsResponse.status, responseText);
-
     return res.status(nsResponse.status || 500).json({
       success: false,
       error: `NetSuite returned ${nsResponse.status}`,
       details: responseBody,
     });
+
   } catch (err) {
     console.error("Adjustment API error:", err);
     return res.status(500).json({ success: false, error: err.message });
