@@ -115,6 +115,7 @@ export default function App() {
   const [expected, setExpected] = useState(saved?.expected || []);
   const [selectedPrefixes, setSelectedPrefixes] = useState(saved?.selectedPrefixes ?? null);
   const [styleSearch, setStyleSearch] = useState("");
+  const [locationBinMap, setLocationBinMap] = useState(saved?.locationBinMap || {}); // {binName: binId} for ALL bins at location
 
   // Scanning
   const [currentBin, setCurrentBin] = useState(saved?.currentBin || null);
@@ -168,11 +169,11 @@ export default function App() {
     if (phase === "setup" && classes.length === 0) return;
     saveSession({
       phase, classes, locations, classPath, selectedClassId,
-      selectedLocation, adjustAcct, expected, selectedPrefixes, currentBin,
+      selectedLocation, adjustAcct, expected, selectedPrefixes, locationBinMap, currentBin,
       binHistory, scans, scanLog, emailTo,
     });
   }, [phase, classes, locations, classPath, selectedClassId,
-    selectedLocation, adjustAcct, expected, selectedPrefixes, currentBin,
+    selectedLocation, adjustAcct, expected, selectedPrefixes, locationBinMap, currentBin,
     binHistory, scans, scanLog, emailTo]);
 
   // ── AUTO FOCUS ──
@@ -232,6 +233,20 @@ export default function App() {
       `);
       setExpected(items);
       if (items.length === 0) setError("No inventory found for this class/location.");
+
+      // Pull ALL bin name→ID mappings at this location (across all classes)
+      setLoadMsg("Loading bins...");
+      const binRows = await suiteql(`
+        SELECT DISTINCT ib.binnumber AS bin_id, BUILTIN.DF(ib.binnumber) AS bin_name
+        FROM inventorybalance ib
+        WHERE ib.location = ${selectedLocation.id}
+          AND ib.binnumber IS NOT NULL
+      `);
+      const bMap = {};
+      binRows.forEach(r => { if (r.bin_name && r.bin_id) bMap[r.bin_name] = r.bin_id; });
+      setLocationBinMap(bMap);
+      console.log("Loaded bin map:", Object.keys(bMap).length, "bins");
+
       setSelectedPrefixes(null);
       setPhase("styles");
     } catch (e) {
@@ -463,11 +478,7 @@ export default function App() {
           subsidiary: "Great Lakes Work Wear",
           memo: `Count: ${classPath.map(c => c.name).join(" > ")} @ ${selectedLocation.name} (${today()})`,
           items: rows.map(r => ({ internalid: r.internalid, diff: r.diff, bin_id: r.bin_id || null, bin_name: r.bin || null })),
-          binMap: (() => {
-            const m = {};
-            expected.forEach(i => { if (i.bin_number && i.bin_id) m[i.bin_number] = i.bin_id; });
-            return m;
-          })(),
+          binMap: locationBinMap,
         }),
       });
       const data = await resp.json();
