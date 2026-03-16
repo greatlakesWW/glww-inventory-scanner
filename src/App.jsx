@@ -144,6 +144,8 @@ export default function App() {
   const [selectedPrefixes, setSelectedPrefixes] = useState(saved?.selectedPrefixes ?? null);
   const [styleSearch, setStyleSearch] = useState("");
   const [locationBinMap, setLocationBinMap] = useState(saved?.locationBinMap || {}); // {binName: binId} for ALL bins at location
+  const [noBinItems, setNoBinItems] = useState([]);
+  const [showNoBin, setShowNoBin] = useState(false);
 
   // Scanning
   const [currentBin, setCurrentBin] = useState(saved?.currentBin || null);
@@ -268,10 +270,29 @@ export default function App() {
         WHERE ib.location = ${selectedLocation.id}
           ${classFilter}
           AND ib.quantityonhand > 0
+          AND ib.binnumber IS NOT NULL
         ORDER BY BUILTIN.DF(ib.binnumber), item.itemid
       `, (loaded, total) => setLoadMsg(`Pulling inventory... ${loaded}${total ? ` / ${total}` : ""} items`));
       setExpected(items);
       if (items.length === 0) setError("No inventory found for this class/location.");
+
+      // Check for items with no bin assigned
+      setLoadMsg("Checking for unassigned items...");
+      const noBinItems = await suiteql(`
+        SELECT
+          item.id AS internalid,
+          item.itemid AS sku,
+          item.displayname AS itemname,
+          ib.quantityonhand AS qty
+        FROM inventorybalance ib
+        JOIN item ON ib.item = item.id
+        WHERE ib.location = ${selectedLocation.id}
+          ${classFilter}
+          AND ib.quantityonhand > 0
+          AND ib.binnumber IS NULL
+        ORDER BY item.itemid
+      `);
+      setNoBinItems(noBinItems);
 
       // Pull ALL bin name→ID mappings via ItemBinQuantity (works for empty bins too)
       setLoadMsg("Loading bins...");
@@ -944,6 +965,41 @@ export default function App() {
           <div style={{ marginTop: 12, fontSize: 13, color: "#94a3b8", textAlign: "center", ...mono }}>
             <span style={{ color: "#e2e8f0", fontWeight: 700 }}>{selectedItemCount}</span> items in <span style={{ color: "#e2e8f0", fontWeight: 700 }}>{activePrefixes.size}</span> styles
           </div>
+
+          {/* No-bin items warning */}
+          {noBinItems.length > 0 && (
+            <div style={{ marginTop: 12, borderRadius: 8, border: "1px solid rgba(245,158,11,0.3)", background: "rgba(245,158,11,0.06)", overflow: "hidden" }}>
+              <button onClick={() => setShowNoBin(p => !p)} style={{
+                width: "100%", padding: "12px 14px", border: "none", background: "transparent",
+                color: "#f59e0b", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+                textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center",
+              }}>
+                <span>⚠ {noBinItems.length} item{noBinItems.length !== 1 ? "s" : ""} at this location with no bin assigned</span>
+                <span style={{ fontSize: 16 }}>{showNoBin ? "▲" : "▼"}</span>
+              </button>
+              {showNoBin && (
+                <div style={{ maxHeight: 300, overflowY: "auto", borderTop: "1px solid rgba(245,158,11,0.15)" }}>
+                  {noBinItems.map((item, i) => (
+                    <div key={i} style={{
+                      display: "flex", justifyContent: "space-between", alignItems: "center",
+                      padding: "8px 14px", borderBottom: "1px solid rgba(255,255,255,0.03)",
+                      background: i % 2 ? "rgba(255,255,255,0.01)" : "transparent",
+                    }}>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 600, ...mono, color: "#e2e8f0" }}>{item.sku}</div>
+                        <div style={{ fontSize: 11, color: "#64748b" }}>{item.itemname}</div>
+                      </div>
+                      <div style={{ ...mono, fontSize: 14, fontWeight: 700, color: "#f59e0b" }}>{item.qty}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div style={{ padding: "8px 14px", fontSize: 11, color: "#94a3b8", borderTop: "1px solid rgba(245,158,11,0.1)" }}>
+                These items are excluded from counting. Assign them to bins in NetSuite to include them.
+              </div>
+            </div>
+          )}
+
           <button style={{ ...S.btn, background: "#22c55e", marginTop: 14, opacity: activePrefixes.size > 0 ? 1 : 0.4 }} onClick={() => setPhase("scanning")} disabled={activePrefixes.size === 0}>
             Start Scanning
           </button>
