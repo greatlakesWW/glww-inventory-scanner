@@ -113,11 +113,15 @@ export default function App() {
   const [flash, setFlash] = useState(null);
   const [filter, setFilter] = useState("");
   const [emailTo, setEmailTo] = useState(saved?.emailTo || "");
+  const [selectedPrefixes, setSelectedPrefixes] = useState(saved?.selectedPrefixes ?? null);
+  const [styleSearch, setStyleSearch] = useState("");
 
   const scanRef = useRef(null);
   const binRef = useRef(null);
 
   // ── DERIVED ──
+  const getSkuPrefix = (sku) => (sku || "").split("-")[0];
+
   const upcLookup = useMemo(() => {
     const m = {};
     expected.forEach((item) => { if (item.upc) m[item.upc] = item; });
@@ -152,11 +156,11 @@ export default function App() {
     saveSession({
       phase, classes, locations, classPath, selectedClassId,
       selectedLocation, adjustAcct, expected, currentBin,
-      binHistory, scans, scanLog, emailTo,
+      binHistory, scans, scanLog, emailTo, selectedPrefixes,
     });
   }, [phase, classes, locations, classPath, selectedClassId,
     selectedLocation, adjustAcct, expected, currentBin,
-    binHistory, scans, scanLog, emailTo]);
+    binHistory, scans, scanLog, emailTo, selectedPrefixes]);
 
   // ── AUTO FOCUS ──
   useEffect(() => {
@@ -203,6 +207,7 @@ export default function App() {
       const items = await suiteql(`
         SELECT
           item.id AS internalid,
+          item.externalid AS externalid,
           item.itemid AS sku,
           item.displayname AS itemname,
           item.upccode AS upc,
@@ -219,7 +224,7 @@ export default function App() {
 
       setExpected(items);
       if (items.length === 0) setError("No inventory found for this class/location.");
-      setPhase("scanning");
+      setPhase("styles");
     } catch (e) {
       setError(`Failed: ${e.message}`);
     } finally { setLoading(false); setLoadMsg(""); }
@@ -338,8 +343,8 @@ export default function App() {
 
   const exportDetail = () => {
     const rows = getComparison();
-    const h = "Internal ID,SKU,Item Name,UPC,Bin,Bin ID,Expected Qty,Scanned Qty,Difference,Status\n";
-    const b = rows.map(r => `"${r.internalid}","${r.sku}","${(r.itemname || "").replace(/"/g, '""')}","${r.upc}","${r.bin}","${r.bin_id || ""}",${r.expected_qty},${r.scanned_qty},${r.diff},"${ST[r.status].l}"`).join("\n");
+    const h = "Internal ID,External ID,SKU,Item Name,UPC,Bin,Bin ID,Expected Qty,Scanned Qty,Difference,Status\n";
+    const b = rows.map(r => `"${r.internalid}","${r.externalid || ""}","${r.sku}","${(r.itemname || "").replace(/"/g, '""')}","${r.upc}","${r.bin}","${r.bin_id || ""}",${r.expected_qty},${r.scanned_qty},${r.diff},"${ST[r.status].l}"`).join("\n");
     dl(h + b, `count_detail_${(selectedLocation?.name || "").replace(/\s+/g, "_")}_${today()}.csv`);
   };
 
@@ -351,9 +356,9 @@ export default function App() {
     const d = new Date();
     const dateStr = `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
     const periodStr = d.toLocaleString("en-US", { month: "short" }) + " " + d.getFullYear();
-    const h = "External ID,Adjustment Account,Adjustment Location,Subsidiary,Date,Posting Period,Internal ID,Adjust Qty By,Location,Internal ID Bins,Quantity\n";
+    const h = "External ID,Adjustment Account,Adjustment Location,Subsidiary,Date,Posting Period,Internal ID,Item External ID,SKU,Adjust Qty By,Location,Bin Number,Quantity\n";
     const b = rows.map(r =>
-      `"${extId}","60050 Inventory Adjustment","${selectedLocation?.name}","Great Lakes Work Wear","${dateStr}","${periodStr}","${r.internalid}",${r.diff},"${selectedLocation?.name}","${r.bin_id || ""}",${r.diff}`
+      `"${extId}","60050 Inventory Adjustment","${selectedLocation?.name}","Great Lakes Work Wear","${dateStr}","${periodStr}",${r.internalid || ""},"${r.externalid || ""}","${r.sku}",${r.diff},"${selectedLocation?.name}","${r.bin || ""}",${r.diff}`
     ).join("\n");
     dl(h + b, `ns_import_${locName}_${today()}.csv`);
   };
@@ -362,6 +367,11 @@ export default function App() {
   const [showEmailModal, setShowEmailModal] = useState(false);
   const [emailSending, setEmailSending] = useState(false);
   const [emailType, setEmailType] = useState("detail"); // "detail" | "ns"
+
+  // ── SUBMIT TO NETSUITE ──
+  const [showSubmitConfirm, setShowSubmitConfirm] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitResult, setSubmitResult] = useState(null); // {success, message, recordUrl, error}
 
   const buildCSVFile = (type) => {
     const rows = type === "ns" ? getComparison().filter(r => r.diff !== 0) : getComparison();
@@ -373,15 +383,15 @@ export default function App() {
       const d = new Date();
       const dateStr = `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
       const periodStr = d.toLocaleString("en-US", { month: "short" }) + " " + d.getFullYear();
-      const h = "External ID,Adjustment Account,Adjustment Location,Subsidiary,Date,Posting Period,Internal ID,Adjust Qty By,Location,Internal ID Bins,Quantity\n";
+      const h = "External ID,Adjustment Account,Adjustment Location,Subsidiary,Date,Posting Period,Internal ID,Item External ID,SKU,Adjust Qty By,Location,Bin Number,Quantity\n";
       const b = rows.map(r =>
-        `"${extId}","60050 Inventory Adjustment","${selectedLocation?.name}","Great Lakes Work Wear","${dateStr}","${periodStr}","${r.internalid}",${r.diff},"${selectedLocation?.name}","${r.bin_id || ""}",${r.diff}`
+        `"${extId}","60050 Inventory Adjustment","${selectedLocation?.name}","Great Lakes Work Wear","${dateStr}","${periodStr}",${r.internalid || ""},"${r.externalid || ""}","${r.sku}",${r.diff},"${selectedLocation?.name}","${r.bin || ""}",${r.diff}`
       ).join("\n");
       content = h + b;
       filename = `ns_import_${locName}_${today()}.csv`;
     } else {
-      const h = "Internal ID,SKU,Item Name,UPC,Bin,Bin ID,Expected Qty,Scanned Qty,Difference,Status\n";
-      const b = rows.map(r => `"${r.internalid}","${r.sku}","${(r.itemname || "").replace(/"/g, '""')}","${r.upc}","${r.bin}","${r.bin_id || ""}",${r.expected_qty},${r.scanned_qty},${r.diff},"${ST[r.status].l}"`).join("\n");
+      const h = "Internal ID,External ID,SKU,Item Name,UPC,Bin,Bin ID,Expected Qty,Scanned Qty,Difference,Status\n";
+      const b = rows.map(r => `"${r.internalid}","${r.externalid || ""}","${r.sku}","${(r.itemname || "").replace(/"/g, '""')}","${r.upc}","${r.bin}","${r.bin_id || ""}",${r.expected_qty},${r.scanned_qty},${r.diff},"${ST[r.status].l}"`).join("\n");
       content = h + b;
       filename = `count_detail_${locName}_${today()}.csv`;
     }
@@ -436,6 +446,96 @@ export default function App() {
     } finally {
       setEmailSending(false);
     }
+  };
+
+  const submitToNetSuite = async () => {
+    const rows = getComparison().filter(r => r.diff !== 0);
+    if (rows.length === 0) { setError("All counts match. No adjustments needed."); return; }
+    setSubmitting(true);
+    setSubmitResult(null);
+    setError(null);
+    try {
+      const resp = await fetch("/api/adjust", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          locationId: selectedLocation.id,
+          locationName: selectedLocation.name,
+          subsidiary: "Great Lakes Work Wear",
+          memo: `Count: ${classPath.map(c => c.name).join(" > ")} @ ${selectedLocation.name} (${today()})`,
+          items: rows.map(r => ({
+            internalid: r.internalid,
+            diff: r.diff,
+            bin_id: r.bin_id || null,
+          })),
+        }),
+      });
+      const data = await resp.json();
+      if (data.success) {
+        setSubmitResult({
+          success: true,
+          message: data.message,
+          recordUrl: data.recordUrl,
+          recordId: data.recordId,
+        });
+        setShowSubmitConfirm(false);
+      } else {
+        setSubmitResult({
+          success: false,
+          error: data.error || "Unknown error",
+          details: data.details,
+        });
+      }
+    } catch (e) {
+      setSubmitResult({ success: false, error: e.message });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // ── REVIEW EDITS ──
+  const [editingItem, setEditingItem] = useState(null); // key of item being edited
+  const [editValue, setEditValue] = useState("");
+
+  const getScansKey = (row) => {
+    const upc = row.upc || "";
+    const bin = row.bin || "";
+    const sku = row.sku || "";
+    // Check which key exists in scans
+    const upcKey = bin ? `${bin}::${upc}` : upc;
+    const skuKey = bin ? `${bin}::SKU:${sku}` : `SKU:${sku}`;
+    if (upc && scans[upcKey] !== undefined) return upcKey;
+    if (scans[skuKey] !== undefined) return skuKey;
+    // Default: create a UPC key if we have UPC, else SKU key
+    return upc ? upcKey : skuKey;
+  };
+
+  const adjustReviewQty = (row, delta) => {
+    const key = getScansKey(row);
+    setScans(p => {
+      const current = p[key] || 0;
+      const next = Math.max(0, current + delta);
+      if (next === 0) {
+        const n = { ...p };
+        delete n[key];
+        return n;
+      }
+      return { ...p, [key]: next };
+    });
+  };
+
+  const setReviewQty = (row, newQty) => {
+    const key = getScansKey(row);
+    const qty = Math.max(0, parseInt(newQty) || 0);
+    setScans(p => {
+      if (qty === 0) {
+        const n = { ...p };
+        delete n[key];
+        return n;
+      }
+      return { ...p, [key]: qty };
+    });
+    setEditingItem(null);
   };
 
   // ═══════════════════════════════════════════════════════════
@@ -541,8 +641,113 @@ export default function App() {
               onClick={pullInventory} disabled={!selectedClassId || !selectedLocation || loading}>
               {loading ? "Loading..." : "Pull Inventory & Start Scanning"}
             </button>
-            <button style={S.btnSec} onClick={() => { setExpected([]); setPhase("scanning"); }}>Skip — Scan Only</button>
+            <button style={S.btnSec} onClick={() => { setExpected([]); setPhase("styles"); }}>Skip — Scan Only</button>
           </>)}
+        </div>
+      </div>
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // RENDER: STYLES
+  // ═══════════════════════════════════════════════════════════
+  if (phase === "styles") {
+    const prefixCounts = {};
+    expected.forEach(item => {
+      const p = getSkuPrefix(item.sku);
+      if (p) prefixCounts[p] = (prefixCounts[p] || 0) + 1;
+    });
+    const allPrefixes = Object.keys(prefixCounts).sort();
+    const filteredPrefixes = styleSearch
+      ? allPrefixes.filter(p => p.toLowerCase().includes(styleSearch.toLowerCase()))
+      : allPrefixes;
+
+    // If selectedPrefixes is null → all selected
+    const localSelected = selectedPrefixes === null
+      ? new Set(allPrefixes)
+      : new Set(selectedPrefixes);
+
+    const togglePrefix = (p) => {
+      const next = new Set(localSelected);
+      if (next.has(p)) next.delete(p); else next.add(p);
+      if (next.size === allPrefixes.length) setSelectedPrefixes(null);
+      else setSelectedPrefixes([...next]);
+    };
+
+    const selectAll = () => setSelectedPrefixes(null);
+    const deselectAll = () => setSelectedPrefixes([]);
+
+    const selectedItemCount = expected.filter(item => localSelected.has(getSkuPrefix(item.sku))).length;
+    const selectedStyleCount = localSelected.size;
+
+    return (
+      <div style={S.root}>
+        <style>{FONT}</style>
+        <div style={S.hdr}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <Logo />
+            <span style={{ fontSize: 15, fontWeight: 700 }}>Select Styles</span>
+          </div>
+          <button style={S.btnSm} onClick={() => setPhase("setup")}>← Setup</button>
+        </div>
+        <div style={{ padding: 16 }}>
+          {/* Search */}
+          <input
+            style={{ ...S.inp, marginBottom: 10 }}
+            placeholder="Search styles..."
+            value={styleSearch}
+            onChange={e => setStyleSearch(e.target.value)}
+          />
+
+          {/* Select All / Deselect All */}
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <button style={{ ...S.btnSm, flex: 1 }} onClick={selectAll}>Select All</button>
+            <button style={{ ...S.btnSm, flex: 1 }} onClick={deselectAll}>Deselect All</button>
+          </div>
+
+          {/* Prefix buttons */}
+          <div style={{ ...S.card, maxHeight: 400, overflowY: "auto" }}>
+            {filteredPrefixes.length === 0 && (
+              <div style={{ padding: 20, textAlign: "center", color: "#475569", fontSize: 13 }}>
+                {expected.length === 0 ? "No inventory loaded." : "No styles match your search."}
+              </div>
+            )}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {filteredPrefixes.map(p => {
+                const isSel = localSelected.has(p);
+                return (
+                  <button key={p} onClick={() => togglePrefix(p)}
+                    style={{
+                      padding: "8px 14px", borderRadius: 8, fontSize: 13, fontWeight: 600,
+                      cursor: "pointer", fontFamily: "inherit", touchAction: "manipulation",
+                      border: isSel ? "1px solid rgba(59,130,246,0.5)" : "1px solid rgba(255,255,255,0.1)",
+                      background: isSel ? "rgba(59,130,246,0.15)" : "rgba(255,255,255,0.05)",
+                      color: isSel ? "#60a5fa" : "#94a3b8",
+                      transition: "all 0.15s",
+                    }}
+                  >
+                    <span style={mono}>{p}</span>
+                    <span style={{ marginLeft: 6, fontSize: 11, opacity: 0.7 }}>({prefixCounts[p]})</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Summary */}
+          <div style={{ marginTop: 12, fontSize: 13, color: "#94a3b8", textAlign: "center", ...mono }}>
+            <span style={{ color: "#e2e8f0", fontWeight: 700 }}>{selectedItemCount}</span> items in{" "}
+            <span style={{ color: "#e2e8f0", fontWeight: 700 }}>{selectedStyleCount}</span> styles selected
+          </div>
+
+          {/* Start Scanning */}
+          <button
+            style={{ ...S.btn, background: "#22c55e", marginTop: 14, opacity: selectedStyleCount > 0 ? 1 : 0.4 }}
+            onClick={() => setPhase("scanning")}
+            disabled={selectedStyleCount === 0}
+          >
+            Start Scanning
+          </button>
         </div>
       </div>
     );
@@ -740,6 +945,88 @@ export default function App() {
           </button>
         )}
 
+        {/* Submit to NetSuite */}
+        {!submitResult?.success && (
+          <button
+            style={{ ...S.btn, marginBottom: 10, background: "#7c3aed", fontSize: 15 }}
+            onClick={() => setShowSubmitConfirm(true)}
+            disabled={submitting || adjCount === 0}
+          >
+            {submitting ? "Submitting..." : `Submit to NetSuite (${adjCount} items)`}
+          </button>
+        )}
+
+        {/* Submit Result */}
+        {submitResult && (
+          <div style={{
+            padding: "14px 16px", borderRadius: 8, marginBottom: 10,
+            background: submitResult.success ? "rgba(34,197,94,0.08)" : "rgba(239,68,68,0.08)",
+            border: `1px solid ${submitResult.success ? "rgba(34,197,94,0.25)" : "rgba(239,68,68,0.25)"}`,
+          }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: submitResult.success ? "#22c55e" : "#ef4444", marginBottom: 6 }}>
+              {submitResult.success ? "✓ Adjustment Created" : "✗ Submission Failed"}
+            </div>
+            <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: submitResult.recordUrl ? 8 : 0 }}>
+              {submitResult.success ? submitResult.message : (submitResult.error || "Unknown error")}
+            </div>
+            {submitResult.details && !submitResult.success && (
+              <div style={{ fontSize: 11, color: "#f87171", marginTop: 4, ...mono, wordBreak: "break-all" }}>
+                {typeof submitResult.details === "string" ? submitResult.details : JSON.stringify(submitResult.details).slice(0, 300)}
+              </div>
+            )}
+            {submitResult.recordUrl && (
+              <a
+                href={submitResult.recordUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  display: "inline-block", padding: "10px 16px", borderRadius: 6,
+                  background: "rgba(59,130,246,0.15)", border: "1px solid rgba(59,130,246,0.3)",
+                  color: "#60a5fa", fontSize: 13, fontWeight: 600, textDecoration: "none",
+                }}
+              >
+                Open in NetSuite →
+              </a>
+            )}
+          </div>
+        )}
+
+        {/* Submit Confirmation Modal */}
+        {showSubmitConfirm && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}
+            onClick={() => setShowSubmitConfirm(false)}>
+            <div style={{ ...S.card, maxWidth: 380, width: "100%", background: "#1e293b" }} onClick={e => e.stopPropagation()}>
+              <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 8, color: "#e2e8f0" }}>Submit to NetSuite?</div>
+              <div style={{ fontSize: 13, color: "#94a3b8", marginBottom: 16, lineHeight: 1.5 }}>
+                This will create an inventory adjustment with <strong style={{ color: "#e2e8f0" }}>{adjCount} line items</strong> at <strong style={{ color: "#e2e8f0" }}>{selectedLocation?.name}</strong>.
+                You can review and verify the transaction in NetSuite after it's created.
+              </div>
+              <div style={{ ...S.card, padding: "10px 14px", marginBottom: 16, background: "rgba(255,255,255,0.03)" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
+                  <span style={{ color: "#64748b" }}>Location</span>
+                  <span style={{ ...mono }}>{selectedLocation?.name}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
+                  <span style={{ color: "#64748b" }}>Account</span>
+                  <span style={{ ...mono }}>60050 Inventory Adjustment</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
+                  <span style={{ color: "#64748b" }}>Increases</span>
+                  <span style={{ ...mono, color: "#22c55e" }}>{comparison.filter(r => r.diff > 0).length} items</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                  <span style={{ color: "#64748b" }}>Decreases</span>
+                  <span style={{ ...mono, color: "#ef4444" }}>{comparison.filter(r => r.diff < 0).length} items</span>
+                </div>
+              </div>
+              <button style={{ ...S.btn, background: "#7c3aed", marginBottom: 8 }} onClick={submitToNetSuite} disabled={submitting}>
+                {submitting ? "Creating Adjustment..." : "Confirm & Submit"}
+              </button>
+              <button style={S.btnSec} onClick={() => setShowSubmitConfirm(false)}>Cancel</button>
+            </div>
+          </div>
+        )}
+
         {/* Email Modal */}
         {showEmailModal && (
           <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}
@@ -771,22 +1058,78 @@ export default function App() {
         )}
         <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
           <div style={{ overflowY: "auto", maxHeight: "calc(100vh - 380px)" }}>
-            {filtered.map((r, i) => (
-              <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", borderBottom: "1px solid rgba(255,255,255,0.03)", background: i % 2 ? "rgba(255,255,255,0.01)" : "transparent" }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
-                    <Badge s={r.status} />
-                    {r.bin && <span style={{ fontSize: 10, color: "#818cf8", ...mono }}>{r.bin}</span>}
+            {filtered.map((r, i) => {
+              const rowKey = getScansKey(r);
+              const isEditing = editingItem === `${r.internalid}-${r.bin}`;
+              return (
+                <div key={i} style={{ display: "flex", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid rgba(255,255,255,0.03)", background: i % 2 ? "rgba(255,255,255,0.01)" : "transparent" }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+                      <Badge s={r.status} />
+                      {r.bin && <span style={{ fontSize: 10, color: "#818cf8", ...mono }}>{r.bin}</span>}
+                    </div>
+                    <div style={{ fontSize: 13, fontWeight: 600, ...mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.sku || r.itemname}</div>
+                    <div style={{ fontSize: 10, color: "#64748b" }}>{r.upc || "No UPC"}</div>
                   </div>
-                  <div style={{ fontSize: 13, fontWeight: 600, ...mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.sku || r.itemname}</div>
-                  <div style={{ fontSize: 10, color: "#64748b" }}>{r.upc || "No UPC"}</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: 8 }}>
+                    {/* Minus button */}
+                    <button
+                      onClick={(e) => { e.stopPropagation(); adjustReviewQty(r, -1); }}
+                      style={{
+                        width: 32, height: 32, borderRadius: 6, border: "1px solid rgba(239,68,68,0.3)",
+                        background: "rgba(239,68,68,0.1)", color: "#ef4444", fontSize: 18, fontWeight: 700,
+                        cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+                        fontFamily: "inherit", touchAction: "manipulation",
+                      }}
+                    >−</button>
+
+                    {/* Scanned qty - tap to edit */}
+                    {isEditing ? (
+                      <input
+                        autoFocus
+                        style={{ ...S.inp, width: 50, padding: "4px 6px", fontSize: 16, textAlign: "center", ...mono, minHeight: 32 }}
+                        value={editValue}
+                        onChange={e => setEditValue(e.target.value.replace(/[^0-9]/g, ""))}
+                        onKeyDown={e => { if (e.key === "Enter") setReviewQty(r, editValue); if (e.key === "Escape") setEditingItem(null); }}
+                        onBlur={() => setReviewQty(r, editValue)}
+                        onClick={e => e.stopPropagation()}
+                      />
+                    ) : (
+                      <div
+                        onClick={(e) => { e.stopPropagation(); setEditingItem(`${r.internalid}-${r.bin}`); setEditValue(String(r.scanned_qty)); }}
+                        style={{
+                          ...mono, fontSize: 16, fontWeight: 700, textAlign: "center", minWidth: 40,
+                          padding: "4px 6px", borderRadius: 6, cursor: "pointer",
+                          border: "1px dashed rgba(255,255,255,0.15)", color: "#e2e8f0",
+                        }}
+                        title="Tap to edit"
+                      >
+                        {r.scanned_qty}
+                      </div>
+                    )}
+
+                    {/* Plus button */}
+                    <button
+                      onClick={(e) => { e.stopPropagation(); adjustReviewQty(r, 1); }}
+                      style={{
+                        width: 32, height: 32, borderRadius: 6, border: "1px solid rgba(34,197,94,0.3)",
+                        background: "rgba(34,197,94,0.1)", color: "#22c55e", fontSize: 18, fontWeight: 700,
+                        cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+                        fontFamily: "inherit", touchAction: "manipulation",
+                      }}
+                    >+</button>
+
+                    {/* Expected & diff */}
+                    <div style={{ textAlign: "right", marginLeft: 4, minWidth: 44 }}>
+                      <div style={{ fontSize: 10, color: "#64748b" }}>/ {r.expected_qty}</div>
+                      <div style={{ ...mono, fontSize: 13, fontWeight: 700, color: r.diff === 0 ? "#22c55e" : r.diff > 0 ? "#f59e0b" : "#ef4444" }}>
+                        {r.diff > 0 ? `+${r.diff}` : r.diff}
+                      </div>
+                    </div>
+                  </div>
                 </div>
-                <div style={{ textAlign: "right", marginLeft: 12, whiteSpace: "nowrap" }}>
-                  <div style={{ fontSize: 11, color: "#94a3b8" }}><span style={mono}>{r.scanned_qty}</span> / <span style={mono}>{r.expected_qty}</span></div>
-                  <div style={{ ...mono, fontSize: 16, fontWeight: 700, color: r.diff === 0 ? "#22c55e" : r.diff > 0 ? "#f59e0b" : "#ef4444" }}>{r.diff > 0 ? `+${r.diff}` : r.diff}</div>
-                </div>
-              </div>
-            ))}
+              );
+            })}
             {filtered.length === 0 && <div style={{ padding: 32, textAlign: "center", color: "#475569" }}>No items match filter.</div>}
           </div>
         </div>
