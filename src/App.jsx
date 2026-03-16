@@ -99,7 +99,7 @@ const clearSession = () => { try { localStorage.removeItem(SESSION_KEY); } catch
 export default function App() {
   const saved = useRef(loadSession()).current;
 
-  const [phase, setPhase] = useState(saved?.phase || "setup");
+  const [phase, setPhase] = useState(saved?.phase || "home");
   const [loading, setLoading] = useState(false);
   const [loadMsg, setLoadMsg] = useState("");
   const [error, setError] = useState(null);
@@ -129,6 +129,12 @@ export default function App() {
 
   const scanRef = useRef(null);
   const binRef = useRef(null);
+
+  // Lookup mode
+  const [lookupResults, setLookupResults] = useState([]);
+  const [lookupLoading, setLookupLoading] = useState(false);
+  const [lookupHistory, setLookupHistory] = useState([]);
+  const lookupRef = useRef(null);
 
   // ── DERIVED ──
   const upcLookup = useMemo(() => {
@@ -167,6 +173,7 @@ export default function App() {
 
   // ── AUTO-SAVE SESSION ──
   useEffect(() => {
+    if (phase === "home" || phase === "lookup") return;
     if (phase === "setup" && classes.length === 0) return;
     saveSession({
       phase, classes, locations, classPath, selectedClassId,
@@ -293,6 +300,49 @@ export default function App() {
     }
     setTimeout(() => setFlash(null), 400);
   }, [upcLookup, currentBin, binExpected, selectedPrefixes]);
+
+  // ── LOOKUP HANDLER ──
+  const handleLookup = async (upc) => {
+    const trimmed = upc.trim(); if (!trimmed) return;
+    setLookupLoading(true); setError(null);
+    try {
+      const rows = await suiteql(`
+        SELECT
+          item.id AS internalid,
+          item.itemid AS sku,
+          item.displayname AS itemname,
+          item.upccode AS upc,
+          ib.quantityonhand AS qty,
+          ib.binnumber AS bin_id,
+          BUILTIN.DF(ib.binnumber) AS bin_name,
+          BUILTIN.DF(ib.location) AS location_name
+        FROM inventorybalance ib
+        JOIN item ON ib.item = item.id
+        WHERE item.upccode = '${trimmed.replace(/'/g, "''")}'
+          AND ib.quantityonhand > 0
+        ORDER BY BUILTIN.DF(ib.location), BUILTIN.DF(ib.binnumber)
+      `);
+
+      let itemInfo = null;
+      if (rows.length > 0) {
+        itemInfo = { sku: rows[0].sku, itemname: rows[0].itemname, upc: rows[0].upc };
+      } else {
+        // Try to find the item even if no inventory
+        const itemRows = await suiteql(`
+          SELECT id, itemid AS sku, displayname AS itemname, upccode AS upc
+          FROM item WHERE upccode = '${trimmed.replace(/'/g, "''")}'
+        `);
+        if (itemRows.length > 0) itemInfo = itemRows[0];
+      }
+
+      const result = { upc: trimmed, item: itemInfo, bins: rows, time: new Date() };
+      setLookupResults([result, ...lookupHistory]);
+      setLookupHistory(p => [result, ...p].slice(0, 20));
+      if (!itemInfo) beepWarn(); else beepOk();
+    } catch (e) {
+      setError(`Lookup failed: ${e.message}`);
+    } finally { setLookupLoading(false); }
+  };
 
   const undoLast = () => {
     if (scanLog.length === 0) return;
@@ -498,7 +548,7 @@ export default function App() {
           locationName: selectedLocation.name,
           subsidiary: "Great Lakes Work Wear",
           memo: `Count: ${classPath.map(c => c.name).join(" > ")} @ ${selectedLocation.name} (${today()})`,
-          items: rows.map(r => ({ internalid: r.internalid, diff: r.diff, bin_id: r.bin_id || null, bin_name: r.bin || null })),
+          items: rows.map(r => ({ internalid: r.internalid, diff: r.diff, bin_id: r.bin_id || null, bin_name: r.bin || null, upc: r.upc || null, sku: r.sku || null })),
           binMap: locationBinMap,
         }),
       });
@@ -546,6 +596,161 @@ export default function App() {
   };
 
   // ═══════════════════════════════════════════════════════════
+  // RENDER: HOME
+  // ═══════════════════════════════════════════════════════════
+  if (phase === "home") {
+    return (
+      <div style={S.root}>
+        <style>{FONT}</style>
+        <div style={S.hdr}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}><Logo /><span style={{ fontSize: 15, fontWeight: 700 }}>GLWW Inventory</span></div>
+          <span style={{ fontSize: 10, color: "#475569", ...mono }}>v4</span>
+        </div>
+        <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12, marginTop: 20 }}>
+          {/* Inventory Count */}
+          <button onClick={() => setPhase("setup")} style={{
+            ...S.card, padding: 24, cursor: "pointer", border: "1px solid rgba(59,130,246,0.25)",
+            background: "rgba(59,130,246,0.04)", textAlign: "left", transition: "all 0.15s",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+              <div style={{ width: 48, height: 48, borderRadius: 12, background: "rgba(59,130,246,0.12)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22 }}>📋</div>
+              <div>
+                <div style={{ fontSize: 17, fontWeight: 700, color: "#e2e8f0", marginBottom: 4 }}>Inventory Count</div>
+                <div style={{ fontSize: 12, color: "#94a3b8", lineHeight: 1.4 }}>Scan bins and items to count inventory. Compare against NetSuite and submit adjustments.</div>
+              </div>
+            </div>
+          </button>
+
+          {/* Inventory Lookup */}
+          <button onClick={() => setPhase("lookup")} style={{
+            ...S.card, padding: 24, cursor: "pointer", border: "1px solid rgba(34,197,94,0.25)",
+            background: "rgba(34,197,94,0.04)", textAlign: "left", transition: "all 0.15s",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+              <div style={{ width: 48, height: 48, borderRadius: 12, background: "rgba(34,197,94,0.12)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22 }}>🔍</div>
+              <div>
+                <div style={{ fontSize: 17, fontWeight: 700, color: "#e2e8f0", marginBottom: 4 }}>Inventory Lookup</div>
+                <div style={{ fontSize: 12, color: "#94a3b8", lineHeight: 1.4 }}>Scan a UPC to see which bins and locations hold that item and current quantities.</div>
+              </div>
+            </div>
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // RENDER: LOOKUP
+  // ═══════════════════════════════════════════════════════════
+  if (phase === "lookup") {
+    const latestResult = lookupResults[0] || null;
+
+    return (
+      <div style={S.root}>
+        <style>{FONT}</style>
+        <div style={S.hdr}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <Logo /><span style={{ fontSize: 15, fontWeight: 700 }}>Inventory Lookup</span>
+          </div>
+          <button style={S.btnSm} onClick={() => { setLookupResults([]); setError(null); setPhase("home"); }}>← Home</button>
+        </div>
+        <div style={{ padding: 16 }} onClick={() => lookupRef.current?.focus()}>
+          {/* Scan input */}
+          <div style={{ ...S.card, textAlign: "center", padding: 20, border: "2px solid rgba(34,197,94,0.3)", background: "rgba(34,197,94,0.04)" }}>
+            <div style={{ fontSize: 12, color: "#22c55e", textTransform: "uppercase", letterSpacing: 1, fontWeight: 700, marginBottom: 10 }}>Scan UPC Barcode</div>
+            <input
+              ref={lookupRef}
+              style={{ ...S.inp, fontSize: 20, textAlign: "center", ...mono }}
+              placeholder="Scan or type UPC..."
+              autoFocus
+              onKeyDown={e => { if (e.key === "Enter") { handleLookup(e.target.value); e.target.value = ""; } }}
+            />
+            {lookupLoading && <div style={{ marginTop: 8, fontSize: 12, color: "#93c5fd" }}>Looking up...</div>}
+          </div>
+
+          {error && <div style={S.err}>{error}</div>}
+
+          {/* Latest result */}
+          {latestResult && (
+            <div style={{ marginTop: 10 }}>
+              {latestResult.item ? (
+                <div style={S.card}>
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ fontSize: 16, fontWeight: 700, ...mono, color: "#e2e8f0" }}>{latestResult.item.sku}</div>
+                    <div style={{ fontSize: 13, color: "#94a3b8" }}>{latestResult.item.itemname}</div>
+                    <div style={{ fontSize: 11, color: "#64748b", ...mono }}>UPC: {latestResult.upc}</div>
+                  </div>
+
+                  {latestResult.bins.length > 0 ? (
+                    <>
+                      <div style={{ fontSize: 11, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>
+                        Found in {latestResult.bins.length} bin{latestResult.bins.length !== 1 ? "s" : ""}
+                      </div>
+                      <div style={{ borderRadius: 8, border: "1px solid rgba(255,255,255,0.06)", overflow: "hidden" }}>
+                        {latestResult.bins.map((row, i) => (
+                          <div key={i} style={{
+                            display: "flex", alignItems: "center", justifyContent: "space-between",
+                            padding: "12px 14px", borderBottom: "1px solid rgba(255,255,255,0.04)",
+                            background: i % 2 ? "rgba(255,255,255,0.015)" : "transparent",
+                          }}>
+                            <div>
+                              <div style={{ fontSize: 15, fontWeight: 700, ...mono, color: "#a5b4fc" }}>{row.bin_name}</div>
+                              <div style={{ fontSize: 11, color: "#64748b" }}>{row.location_name}</div>
+                            </div>
+                            <div style={{ textAlign: "right" }}>
+                              <div style={{ fontSize: 22, fontWeight: 700, ...mono, color: "#22c55e" }}>{row.qty}</div>
+                              <div style={{ fontSize: 9, color: "#64748b", textTransform: "uppercase" }}>on hand</div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                      <div style={{ marginTop: 8, fontSize: 12, color: "#94a3b8", textAlign: "right", ...mono }}>
+                        Total: <span style={{ fontWeight: 700, color: "#e2e8f0" }}>{latestResult.bins.reduce((a, b) => a + Number(b.qty), 0)}</span>
+                      </div>
+                    </>
+                  ) : (
+                    <div style={{ padding: 16, textAlign: "center", color: "#f59e0b", fontSize: 13, background: "rgba(245,158,11,0.06)", borderRadius: 8, border: "1px solid rgba(245,158,11,0.2)" }}>
+                      Item exists in NetSuite but has no inventory on hand.
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div style={{ ...S.card, textAlign: "center", padding: 20, background: "rgba(239,68,68,0.04)", border: "1px solid rgba(239,68,68,0.2)" }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: "#ef4444", marginBottom: 4 }}>UPC Not Found</div>
+                  <div style={{ fontSize: 13, color: "#94a3b8", ...mono }}>{latestResult.upc}</div>
+                  <div style={{ fontSize: 12, color: "#64748b", marginTop: 4 }}>This UPC is not in NetSuite.</div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Previous lookups */}
+          {lookupHistory.length > 1 && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>Previous Lookups</div>
+              {lookupHistory.slice(1).map((r, i) => (
+                <div key={i} style={{
+                  display: "flex", alignItems: "center", justifyContent: "space-between",
+                  padding: "10px 14px", borderBottom: "1px solid rgba(255,255,255,0.04)",
+                  opacity: 0.7, cursor: "pointer",
+                }} onClick={() => setLookupResults([r])}>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 600, ...mono }}>{r.item?.sku || "Unknown"}</div>
+                    <div style={{ fontSize: 10, color: "#64748b" }}>{r.upc}</div>
+                  </div>
+                  <div style={{ fontSize: 12, color: r.item ? "#22c55e" : "#ef4444", ...mono }}>
+                    {r.item ? `${r.bins.length} bin${r.bins.length !== 1 ? "s" : ""}` : "Not found"}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
   // RENDER: SETUP
   // ═══════════════════════════════════════════════════════════
   if (phase === "setup") {
@@ -554,8 +759,8 @@ export default function App() {
       <div style={S.root}>
         <style>{FONT}</style>
         <div style={S.hdr}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}><Logo /><span style={{ fontSize: 15, fontWeight: 700 }}>Inventory Scanner</span></div>
-          <span style={{ fontSize: 10, color: "#475569", ...mono }}>v3 • Direct API</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}><Logo /><span style={{ fontSize: 15, fontWeight: 700 }}>Inventory Count</span></div>
+          <button style={S.btnSm} onClick={() => { clearSession(); setPhase("home"); }}>← Home</button>
         </div>
         <div style={{ padding: 16 }}>
           {!hasData && (
