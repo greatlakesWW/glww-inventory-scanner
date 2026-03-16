@@ -76,6 +76,15 @@ const Logo = () => (
 );
 
 // ═══════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════
+const getSkuPrefix = (sku) => {
+  if (!sku) return "";
+  const idx = sku.indexOf("-");
+  return idx > 0 ? sku.substring(0, idx).toUpperCase() : sku.toUpperCase();
+};
+
+// ═══════════════════════════════════════════════════════════
 // SESSION PERSISTENCE
 // ═══════════════════════════════════════════════════════════
 const SESSION_KEY = "glww_scanner_session";
@@ -104,6 +113,8 @@ export default function App() {
 
   // Inventory
   const [expected, setExpected] = useState(saved?.expected || []);
+  const [selectedPrefixes, setSelectedPrefixes] = useState(saved?.selectedPrefixes ?? null);
+  const [styleSearch, setStyleSearch] = useState("");
 
   // Scanning
   const [currentBin, setCurrentBin] = useState(saved?.currentBin || null);
@@ -113,15 +124,11 @@ export default function App() {
   const [flash, setFlash] = useState(null);
   const [filter, setFilter] = useState("");
   const [emailTo, setEmailTo] = useState(saved?.emailTo || "");
-  const [selectedPrefixes, setSelectedPrefixes] = useState(saved?.selectedPrefixes ?? null);
-  const [styleSearch, setStyleSearch] = useState("");
 
   const scanRef = useRef(null);
   const binRef = useRef(null);
 
   // ── DERIVED ──
-  const getSkuPrefix = (sku) => (sku || "").split("-")[0];
-
   const upcLookup = useMemo(() => {
     const m = {};
     expected.forEach((item) => { if (item.upc) m[item.upc] = item; });
@@ -131,11 +138,13 @@ export default function App() {
   const totalScans = Object.values(scans).reduce((a, b) => a + b, 0);
   const uniqueItems = new Set(Object.keys(scans).map(k => k.includes("::") ? k.split("::")[1] : k)).size;
 
+  // FIXED: Filter binExpected by selected prefixes
   const binExpected = useMemo(() => {
     if (!currentBin) return [];
+    const prefixSet = selectedPrefixes ? new Set(selectedPrefixes.map(p => p.toUpperCase())) : null;
     return expected.filter(i => {
       if (!i.bin_number || i.bin_number.toUpperCase() !== currentBin.toUpperCase()) return false;
-      if (selectedPrefixes !== null && !selectedPrefixes.includes(getSkuPrefix(i.sku))) return false;
+      if (prefixSet && !prefixSet.has(getSkuPrefix(i.sku))) return false;
       return true;
     });
   }, [expected, currentBin, selectedPrefixes]);
@@ -159,12 +168,12 @@ export default function App() {
     if (phase === "setup" && classes.length === 0) return;
     saveSession({
       phase, classes, locations, classPath, selectedClassId,
-      selectedLocation, adjustAcct, expected, currentBin,
-      binHistory, scans, scanLog, emailTo, selectedPrefixes,
+      selectedLocation, adjustAcct, expected, selectedPrefixes, currentBin,
+      binHistory, scans, scanLog, emailTo,
     });
   }, [phase, classes, locations, classPath, selectedClassId,
-    selectedLocation, adjustAcct, expected, currentBin,
-    binHistory, scans, scanLog, emailTo, selectedPrefixes]);
+    selectedLocation, adjustAcct, expected, selectedPrefixes, currentBin,
+    binHistory, scans, scanLog, emailTo]);
 
   // ── AUTO FOCUS ──
   useEffect(() => {
@@ -185,12 +194,10 @@ export default function App() {
       const cls = await suiteql(
         "SELECT id, name, parent FROM classification WHERE isinactive = 'F' ORDER BY name"
       );
-
       setLoadMsg("Loading locations...");
       const locs = await suiteql(
         "SELECT id, name FROM location WHERE isinactive = 'F' ORDER BY name"
       );
-
       setClasses(cls);
       setLocations(locs);
       if (cls.length === 0 && locs.length === 0) setError("No data returned. Check NetSuite connection.");
@@ -204,9 +211,7 @@ export default function App() {
     if (!selectedClassId) { setError("Select a class first."); return; }
     if (!selectedLocation) { setError("Select a location first."); return; }
     setLoading(true); setError(null); setLoadMsg("Pulling inventory...");
-
     const classIds = getChildClassIds(selectedClassId).join(",");
-
     try {
       const items = await suiteql(`
         SELECT
@@ -225,9 +230,9 @@ export default function App() {
           AND ib.quantityonhand > 0
         ORDER BY BUILTIN.DF(ib.binnumber), item.itemid
       `);
-
       setExpected(items);
       if (items.length === 0) setError("No inventory found for this class/location.");
+      setSelectedPrefixes(null);
       setPhase("styles");
     } catch (e) {
       setError(`Failed: ${e.message}`);
@@ -265,16 +270,11 @@ export default function App() {
 
   const restartCount = () => {
     if (!confirm("Clear all scans and start over?")) return;
-    setScans({});
-    setScanLog([]);
-    setBinHistory([]);
-    setCurrentBin(null);
-    setFlash(null);
-    setFilter("");
-    clearSession();
+    setScans({}); setScanLog([]); setBinHistory([]); setCurrentBin(null);
+    setFlash(null); setFilter(""); clearSession();
   };
 
-  // Manual SKU entry - find item by SKU in expected list
+  // Manual SKU entry
   const [showManualAdd, setShowManualAdd] = useState(false);
   const [manualSku, setManualSku] = useState("");
   const manualRef = useRef(null);
@@ -290,39 +290,42 @@ export default function App() {
     if (!trimmed) return;
     const match = skuLookup[trimmed];
     if (match && match.upc) {
-      // Found it — add as if scanned by UPC
       handleItemScan(match.upc);
-      setManualSku("");
-      setShowManualAdd(false);
+      setManualSku(""); setShowManualAdd(false);
     } else if (match && !match.upc) {
-      // Item found but no UPC — use SKU as the key
       const key = currentBin ? `${currentBin}::SKU:${match.sku}` : `SKU:${match.sku}`;
       setScans(p => ({ ...p, [key]: (p[key] || 0) + 1 }));
       setScanLog(p => [{ upc: `SKU:${match.sku}`, bin: currentBin, time: new Date(), itemname: match.itemname, sku: match.sku }, ...p]);
       beepOk(); setFlash("ok"); setTimeout(() => setFlash(null), 400);
-      setManualSku("");
-      setShowManualAdd(false);
+      setManualSku(""); setShowManualAdd(false);
     } else {
       setError(`SKU "${trimmed}" not found in expected inventory.`);
     }
   };
 
-  // ── COMPARISON ──
+  // ══════════════════════════════════════════════════════════
+  // COMPARISON — FIXED: filters by scanned bins AND selected prefixes
+  // ══════════════════════════════════════════════════════════
   const getComparison = useCallback(() => {
     const rows = []; const done = new Set();
-    // Filter expected by selected prefixes and scanned bins
-    const filteredExpected = expected.filter(item => {
-      // Prefix filter
-      if (selectedPrefixes !== null && !selectedPrefixes.includes(getSkuPrefix(item.sku))) return false;
-      // Bin filter: only include items from bins we actually scanned
+
+    // Only compare items from bins we actually scanned
+    const scannedBinsUpper = new Set(binHistory.map(b => b.toUpperCase()));
+
+    // Only compare items matching selected style prefixes
+    const prefixSet = selectedPrefixes ? new Set(selectedPrefixes.map(p => p.toUpperCase())) : null;
+
+    expected.forEach(item => {
+      const upc = item.upc || "";
       const bin = item.bin_number || "";
-      if (bin && binHistory.length > 0 && !binHistory.some(b => b.toUpperCase() === bin.toUpperCase())) return false;
-      return true;
-    });
-    filteredExpected.forEach(item => {
-      const upc = item.upc || ""; const bin = item.bin_number || "";
       const binId = item.bin_id || "";
-      // Check for UPC-keyed scan first, then SKU-keyed
+
+      // SKIP items from bins we didn't scan
+      if (bin && scannedBinsUpper.size > 0 && !scannedBinsUpper.has(bin.toUpperCase())) return;
+
+      // SKIP items not in selected prefixes
+      if (prefixSet && !prefixSet.has(getSkuPrefix(item.sku))) return;
+
       const upcKey = bin ? `${bin}::${upc}` : upc;
       const skuKey = bin ? `${bin}::SKU:${item.sku}` : `SKU:${item.sku}`;
       const sq = (upc ? (scans[upcKey] || 0) : 0) + (scans[skuKey] || 0);
@@ -333,17 +336,19 @@ export default function App() {
       if (upc) done.add(upcKey);
       done.add(skuKey);
     });
+
+    // Also include scanned items not in expected
     Object.entries(scans).forEach(([key, count]) => {
       if (!done.has(key)) {
         const [bin, val] = key.includes("::") ? key.split("::") : ["", key];
         const upc = val.startsWith("SKU:") ? "" : val;
         const sku = val.startsWith("SKU:") ? val.replace("SKU:", "") : "";
         const m = upc ? upcLookup[upc] : skuLookup[sku.toUpperCase()];
-        rows.push({ internalid: m?.internalid || "", sku: m?.sku || sku || "", itemname: m?.itemname || `Unknown (${val})`, upc: upc || "", bin, scanned_qty: count, expected_qty: 0, status: "unexpected", diff: count });
+        rows.push({ internalid: m?.internalid || "", externalid: m?.externalid || "", sku: m?.sku || sku || "", itemname: m?.itemname || `Unknown (${val})`, upc: upc || "", bin, bin_id: "", scanned_qty: count, expected_qty: 0, status: "unexpected", diff: count });
       }
     });
     return rows;
-  }, [expected, scans, upcLookup, skuLookup, selectedPrefixes, binHistory]);
+  }, [expected, scans, upcLookup, skuLookup, binHistory, selectedPrefixes]);
 
   // ── CSV EXPORTS ──
   const today = () => new Date().toISOString().slice(0, 10);
@@ -379,12 +384,12 @@ export default function App() {
   // ── SHARE / EMAIL ──
   const [showEmailModal, setShowEmailModal] = useState(false);
   const [emailSending, setEmailSending] = useState(false);
-  const [emailType, setEmailType] = useState("detail"); // "detail" | "ns"
+  const [emailType, setEmailType] = useState("detail");
 
   // ── SUBMIT TO NETSUITE ──
   const [showSubmitConfirm, setShowSubmitConfirm] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [submitResult, setSubmitResult] = useState(null); // {success, message, recordUrl, error}
+  const [submitResult, setSubmitResult] = useState(null);
 
   const buildCSVFile = (type) => {
     const rows = type === "ns" ? getComparison().filter(r => r.diff !== 0) : getComparison();
@@ -416,16 +421,9 @@ export default function App() {
     if (!file) { setError("All counts match. No adjustments needed."); return; }
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
       try {
-        await navigator.share({
-          title: `Inventory Count - ${selectedLocation?.name}`,
-          text: `${classPath.map(c => c.name).join(" > ")} count at ${selectedLocation?.name} (${today()})`,
-          files: [file],
-        });
-      } catch (e) {
-        if (e.name !== "AbortError") { setError("Share failed: " + e.message); }
-      }
+        await navigator.share({ title: `Inventory Count - ${selectedLocation?.name}`, text: `${classPath.map(c => c.name).join(" > ")} count at ${selectedLocation?.name} (${today()})`, files: [file] });
+      } catch (e) { if (e.name !== "AbortError") setError("Share failed: " + e.message); }
     } else {
-      // Fallback — just download
       const url = URL.createObjectURL(file);
       const a = document.createElement("a"); a.href = url; a.download = file.name; a.click();
       URL.revokeObjectURL(url);
@@ -442,31 +440,19 @@ export default function App() {
       const resp = await fetch("/api/email", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          to: emailTo.trim(),
-          subject: `Inventory Count - ${selectedLocation?.name} - ${today()}`,
-          body: `${classPath.map(c => c.name).join(" > ")} count at ${selectedLocation?.name}\n\nMatched: ${stats.matched} | Variance: ${stats.variance} | Review: ${stats.review} | Unexpected: ${stats.unexpected}\n\nCSV file attached.`,
-          filename: file.name,
-          csv: content,
-        }),
+        body: JSON.stringify({ to: emailTo.trim(), subject: `Inventory Count - ${selectedLocation?.name} - ${today()}`, body: `${classPath.map(c => c.name).join(" > ")} count at ${selectedLocation?.name}\n\nCSV file attached.`, filename: file.name, csv: content }),
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || "Send failed");
-      setShowEmailModal(false);
-      setError(null);
-    } catch (e) {
-      setError("Email failed: " + e.message);
-    } finally {
-      setEmailSending(false);
-    }
+      setShowEmailModal(false); setError(null);
+    } catch (e) { setError("Email failed: " + e.message); }
+    finally { setEmailSending(false); }
   };
 
   const submitToNetSuite = async () => {
     const rows = getComparison().filter(r => r.diff !== 0);
-    if (rows.length === 0) { setError("All counts match. No adjustments needed."); return; }
-    setSubmitting(true);
-    setSubmitResult(null);
-    setError(null);
+    if (rows.length === 0) { setError("All counts match."); return; }
+    setSubmitting(true); setSubmitResult(null); setError(null);
     try {
       const resp = await fetch("/api/adjust", {
         method: "POST",
@@ -476,63 +462,38 @@ export default function App() {
           locationName: selectedLocation.name,
           subsidiary: "Great Lakes Work Wear",
           memo: `Count: ${classPath.map(c => c.name).join(" > ")} @ ${selectedLocation.name} (${today()})`,
-          items: rows.map(r => ({
-            internalid: r.internalid,
-            diff: r.diff,
-            bin_id: r.bin_id || null,
-          })),
+          items: rows.map(r => ({ internalid: r.internalid, diff: r.diff, bin_id: r.bin_id || null })),
         }),
       });
       const data = await resp.json();
       if (data.success) {
-        setSubmitResult({
-          success: true,
-          message: data.message,
-          recordUrl: data.recordUrl,
-          recordId: data.recordId,
-        });
+        setSubmitResult({ success: true, message: data.message, recordUrl: data.recordUrl, recordId: data.recordId });
         setShowSubmitConfirm(false);
       } else {
-        setSubmitResult({
-          success: false,
-          error: data.error || "Unknown error",
-          details: data.details,
-        });
+        setSubmitResult({ success: false, error: data.error || "Unknown error", details: data.details });
       }
-    } catch (e) {
-      setSubmitResult({ success: false, error: e.message });
-    } finally {
-      setSubmitting(false);
-    }
+    } catch (e) { setSubmitResult({ success: false, error: e.message }); }
+    finally { setSubmitting(false); }
   };
 
   // ── REVIEW EDITS ──
-  const [editingItem, setEditingItem] = useState(null); // key of item being edited
+  const [editingItem, setEditingItem] = useState(null);
   const [editValue, setEditValue] = useState("");
 
   const getScansKey = (row) => {
-    const upc = row.upc || "";
-    const bin = row.bin || "";
-    const sku = row.sku || "";
-    // Check which key exists in scans
+    const upc = row.upc || ""; const bin = row.bin || ""; const sku = row.sku || "";
     const upcKey = bin ? `${bin}::${upc}` : upc;
     const skuKey = bin ? `${bin}::SKU:${sku}` : `SKU:${sku}`;
     if (upc && scans[upcKey] !== undefined) return upcKey;
     if (scans[skuKey] !== undefined) return skuKey;
-    // Default: create a UPC key if we have UPC, else SKU key
     return upc ? upcKey : skuKey;
   };
 
   const adjustReviewQty = (row, delta) => {
     const key = getScansKey(row);
     setScans(p => {
-      const current = p[key] || 0;
-      const next = Math.max(0, current + delta);
-      if (next === 0) {
-        const n = { ...p };
-        delete n[key];
-        return n;
-      }
+      const next = Math.max(0, (p[key] || 0) + delta);
+      if (next === 0) { const n = { ...p }; delete n[key]; return n; }
       return { ...p, [key]: next };
     });
   };
@@ -541,11 +502,7 @@ export default function App() {
     const key = getScansKey(row);
     const qty = Math.max(0, parseInt(newQty) || 0);
     setScans(p => {
-      if (qty === 0) {
-        const n = { ...p };
-        delete n[key];
-        return n;
-      }
+      if (qty === 0) { const n = { ...p }; delete n[key]; return n; }
       return { ...p, [key]: qty };
     });
     setEditingItem(null);
@@ -556,7 +513,6 @@ export default function App() {
   // ═══════════════════════════════════════════════════════════
   if (phase === "setup") {
     const hasData = classes.length > 0 || locations.length > 0;
-
     return (
       <div style={S.root}>
         <style>{FONT}</style>
@@ -573,8 +529,6 @@ export default function App() {
               <button style={S.btn} onClick={loadSetupData} disabled={loading}>{loading ? "Connecting..." : "Connect to NetSuite"}</button>
             </div>
           )}
-
-          {/* CLASS SELECTOR */}
           {classes.length > 0 && (
             <div style={S.card}>
               <label style={S.lbl}>Class</label>
@@ -607,8 +561,6 @@ export default function App() {
               {selectedClassId && <div style={{ marginTop: 8, fontSize: 12, color: "#60a5fa", ...mono }}>✓ {classPath.map(c => c.name).join(" > ")}</div>}
             </div>
           )}
-
-          {/* LOCATION SELECTOR */}
           {locations.length > 0 && (
             <div style={S.card}>
               <label style={S.lbl}>Location</label>
@@ -616,8 +568,7 @@ export default function App() {
                 {locations.map(loc => {
                   const isSel = selectedLocation?.id === loc.id;
                   return (
-                    <button key={loc.id} onClick={() => setSelectedLocation(loc)}
-                      style={{ display: "block", width: "100%", padding: "14px 16px", border: "none", borderBottom: "1px solid rgba(255,255,255,0.04)", background: isSel ? "rgba(59,130,246,0.08)" : "transparent", color: isSel ? "#60a5fa" : "#e2e8f0", fontSize: 14, fontFamily: "inherit", textAlign: "left", cursor: "pointer", minHeight: 48 }}>
+                    <button key={loc.id} onClick={() => setSelectedLocation(loc)} style={{ display: "block", width: "100%", padding: "14px 16px", border: "none", borderBottom: "1px solid rgba(255,255,255,0.04)", background: isSel ? "rgba(59,130,246,0.08)" : "transparent", color: isSel ? "#60a5fa" : "#e2e8f0", fontSize: 14, fontFamily: "inherit", textAlign: "left", cursor: "pointer", minHeight: 48 }}>
                       {isSel && "✓ "}{loc.name}
                     </button>
                   );
@@ -625,16 +576,12 @@ export default function App() {
               </div>
             </div>
           )}
-
-          {/* ADJ ACCOUNT */}
           {classes.length > 0 && (
             <div style={S.card}>
               <label style={S.lbl}>Adjustment Account (optional)</label>
               <input style={S.inp} value={adjustAcct} onChange={e => setAdjustAcct(e.target.value)} placeholder="Can set during NS import instead" />
             </div>
           )}
-
-          {/* EMAIL RECIPIENT */}
           {classes.length > 0 && (
             <div style={S.card}>
               <label style={S.lbl}>Email Results To (optional)</label>
@@ -645,16 +592,13 @@ export default function App() {
               </select>
             </div>
           )}
-
           {error && hasData && <div style={S.err}>{error}</div>}
           {loading && hasData && <div style={S.load}>{loadMsg}</div>}
-
           {classes.length > 0 && (<>
-            <button style={{ ...S.btn, opacity: selectedClassId && selectedLocation ? 1 : 0.4, background: "#22c55e", marginBottom: 10 }}
-              onClick={pullInventory} disabled={!selectedClassId || !selectedLocation || loading}>
+            <button style={{ ...S.btn, opacity: selectedClassId && selectedLocation ? 1 : 0.4, background: "#22c55e", marginBottom: 10 }} onClick={pullInventory} disabled={!selectedClassId || !selectedLocation || loading}>
               {loading ? "Loading..." : "Pull Inventory & Start Scanning"}
             </button>
-            <button style={S.btnSec} onClick={() => { setExpected([]); setPhase("styles"); }}>Skip — Scan Only</button>
+            <button style={S.btnSec} onClick={() => { setExpected([]); setPhase("scanning"); }}>Skip — Scan Only</button>
           </>)}
         </div>
       </div>
@@ -671,74 +615,47 @@ export default function App() {
       if (p) prefixCounts[p] = (prefixCounts[p] || 0) + 1;
     });
     const allPrefixes = Object.keys(prefixCounts).sort();
-    const filteredPrefixes = styleSearch
-      ? allPrefixes.filter(p => p.toLowerCase().includes(styleSearch.toLowerCase()))
-      : allPrefixes;
-
-    // If selectedPrefixes is null → all selected
-    const localSelected = selectedPrefixes === null
-      ? new Set(allPrefixes)
-      : new Set(selectedPrefixes);
+    const filteredPrefixes = styleSearch ? allPrefixes.filter(p => p.toLowerCase().includes(styleSearch.toLowerCase())) : allPrefixes;
+    const activePrefixes = selectedPrefixes === null ? new Set(allPrefixes) : new Set(selectedPrefixes);
 
     const togglePrefix = (p) => {
-      const next = new Set(localSelected);
+      const next = new Set(activePrefixes);
       if (next.has(p)) next.delete(p); else next.add(p);
-      if (next.size === allPrefixes.length) setSelectedPrefixes(null);
+      if (next.size >= allPrefixes.length) setSelectedPrefixes(null);
       else setSelectedPrefixes([...next]);
     };
 
-    const selectAll = () => setSelectedPrefixes(null);
-    const deselectAll = () => setSelectedPrefixes([]);
-
-    const selectedItemCount = expected.filter(item => localSelected.has(getSkuPrefix(item.sku))).length;
-    const selectedStyleCount = localSelected.size;
+    const selectedItemCount = expected.filter(item => activePrefixes.has(getSkuPrefix(item.sku))).length;
 
     return (
       <div style={S.root}>
         <style>{FONT}</style>
         <div style={S.hdr}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <Logo />
-            <span style={{ fontSize: 15, fontWeight: 700 }}>Select Styles</span>
+            <Logo /><span style={{ fontSize: 15, fontWeight: 700 }}>Select Styles</span>
           </div>
           <button style={S.btnSm} onClick={() => setPhase("setup")}>← Setup</button>
         </div>
         <div style={{ padding: 16 }}>
-          {/* Search */}
-          <input
-            style={{ ...S.inp, marginBottom: 10 }}
-            placeholder="Search styles..."
-            value={styleSearch}
-            onChange={e => setStyleSearch(e.target.value)}
-          />
-
-          {/* Select All / Deselect All */}
+          <input style={{ ...S.inp, marginBottom: 10 }} placeholder="Search styles..." value={styleSearch} onChange={e => setStyleSearch(e.target.value)} />
           <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-            <button style={{ ...S.btnSm, flex: 1 }} onClick={selectAll}>Select All</button>
-            <button style={{ ...S.btnSm, flex: 1 }} onClick={deselectAll}>Deselect All</button>
+            <button style={{ ...S.btnSm, flex: 1 }} onClick={() => setSelectedPrefixes(null)}>Select All</button>
+            <button style={{ ...S.btnSm, flex: 1 }} onClick={() => setSelectedPrefixes([])}>Deselect All</button>
           </div>
-
-          {/* Prefix buttons */}
           <div style={{ ...S.card, maxHeight: 400, overflowY: "auto" }}>
             {filteredPrefixes.length === 0 && (
-              <div style={{ padding: 20, textAlign: "center", color: "#475569", fontSize: 13 }}>
-                {expected.length === 0 ? "No inventory loaded." : "No styles match your search."}
-              </div>
+              <div style={{ padding: 20, textAlign: "center", color: "#475569", fontSize: 13 }}>{expected.length === 0 ? "No inventory loaded." : "No styles match."}</div>
             )}
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
               {filteredPrefixes.map(p => {
-                const isSel = localSelected.has(p);
+                const isSel = activePrefixes.has(p);
                 return (
-                  <button key={p} onClick={() => togglePrefix(p)}
-                    style={{
-                      padding: "8px 14px", borderRadius: 8, fontSize: 13, fontWeight: 600,
-                      cursor: "pointer", fontFamily: "inherit", touchAction: "manipulation",
-                      border: isSel ? "1px solid rgba(59,130,246,0.5)" : "1px solid rgba(255,255,255,0.1)",
-                      background: isSel ? "rgba(59,130,246,0.15)" : "rgba(255,255,255,0.05)",
-                      color: isSel ? "#60a5fa" : "#94a3b8",
-                      transition: "all 0.15s",
-                    }}
-                  >
+                  <button key={p} onClick={() => togglePrefix(p)} style={{
+                    padding: "8px 14px", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", touchAction: "manipulation",
+                    border: isSel ? "1px solid rgba(59,130,246,0.5)" : "1px solid rgba(255,255,255,0.1)",
+                    background: isSel ? "rgba(59,130,246,0.15)" : "rgba(255,255,255,0.05)",
+                    color: isSel ? "#60a5fa" : "#94a3b8", transition: "all 0.15s",
+                  }}>
                     <span style={mono}>{p}</span>
                     <span style={{ marginLeft: 6, fontSize: 11, opacity: 0.7 }}>({prefixCounts[p]})</span>
                   </button>
@@ -746,19 +663,10 @@ export default function App() {
               })}
             </div>
           </div>
-
-          {/* Summary */}
           <div style={{ marginTop: 12, fontSize: 13, color: "#94a3b8", textAlign: "center", ...mono }}>
-            <span style={{ color: "#e2e8f0", fontWeight: 700 }}>{selectedItemCount}</span> items in{" "}
-            <span style={{ color: "#e2e8f0", fontWeight: 700 }}>{selectedStyleCount}</span> styles selected
+            <span style={{ color: "#e2e8f0", fontWeight: 700 }}>{selectedItemCount}</span> items in <span style={{ color: "#e2e8f0", fontWeight: 700 }}>{activePrefixes.size}</span> styles
           </div>
-
-          {/* Start Scanning */}
-          <button
-            style={{ ...S.btn, background: "#22c55e", marginTop: 14, opacity: selectedStyleCount > 0 ? 1 : 0.4 }}
-            onClick={() => setPhase("scanning")}
-            disabled={selectedStyleCount === 0}
-          >
+          <button style={{ ...S.btn, background: "#22c55e", marginTop: 14, opacity: activePrefixes.size > 0 ? 1 : 0.4 }} onClick={() => setPhase("scanning")} disabled={activePrefixes.size === 0}>
             Start Scanning
           </button>
         </div>
@@ -771,14 +679,8 @@ export default function App() {
   // ═══════════════════════════════════════════════════════════
   if (phase === "scanning") {
     const fb = flash === "ok" ? "rgba(34,197,94,0.5)" : flash === "warn" ? "rgba(245,158,11,0.5)" : flash === "bin" ? "rgba(99,102,241,0.5)" : "rgba(255,255,255,0.06)";
-
     const binScans = {};
-    if (currentBin) Object.entries(scans).forEach(([k, v]) => {
-      if (k.startsWith(`${currentBin}::`)) {
-        const val = k.split("::")[1];
-        binScans[val] = v;
-      }
-    });
+    if (currentBin) Object.entries(scans).forEach(([k, v]) => { if (k.startsWith(`${currentBin}::`)) binScans[k.split("::")[1]] = v; });
     const binItemsTotal = binExpected.reduce((a, i) => a + (Number(i.expected_qty) || 0), 0);
     const binScannedTotal = Object.values(binScans).reduce((a, b) => a + b, 0);
 
@@ -804,17 +706,13 @@ export default function App() {
               </div>
             ))}
           </div>
-
-          {/* BIN SCANNER */}
           {!currentBin ? (
             <div style={{ ...S.card, background: "rgba(99,102,241,0.04)", border: "2px solid rgba(99,102,241,0.3)", textAlign: "center", padding: 20 }}>
               <div style={{ fontSize: 12, color: "#818cf8", textTransform: "uppercase", letterSpacing: 1, fontWeight: 700, marginBottom: 10 }}>Scan Bin Barcode</div>
-              <input ref={binRef} style={{ ...S.inp, fontSize: 20, textAlign: "center", ...mono }} placeholder="Scan bin..." autoFocus
-                onKeyDown={e => { if (e.key === "Enter") { handleBinScan(e.target.value); e.target.value = ""; } }} />
+              <input ref={binRef} style={{ ...S.inp, fontSize: 20, textAlign: "center", ...mono }} placeholder="Scan bin..." autoFocus onKeyDown={e => { if (e.key === "Enter") { handleBinScan(e.target.value); e.target.value = ""; } }} />
               {binHistory.length > 0 && <div style={{ marginTop: 8, fontSize: 11, color: "#64748b" }}>Done: {binHistory.join(", ")}</div>}
             </div>
           ) : (<>
-            {/* ACTIVE BIN */}
             <div style={{ ...S.card, background: "rgba(99,102,241,0.06)", border: "1px solid rgba(99,102,241,0.3)", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", marginBottom: 8 }}>
               <div>
                 <div style={{ fontSize: 9, color: "#818cf8", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 600 }}>Bin</div>
@@ -828,24 +726,17 @@ export default function App() {
                 <button style={{ ...S.btnSm, marginTop: 4, fontSize: 11, padding: "4px 12px" }} onClick={switchBin}>Switch Bin</button>
               </div>
             </div>
-
-            {/* ITEM SCANNER */}
             <div style={{ ...S.card, border: `2px solid ${fb}`, transition: "all 0.2s", background: flash === "ok" ? "rgba(34,197,94,0.04)" : flash === "warn" ? "rgba(245,158,11,0.04)" : "transparent", textAlign: "center", padding: 16 }}>
               <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.8, fontWeight: 700, marginBottom: 8, transition: "color 0.2s", color: flash === "ok" ? "#22c55e" : flash === "warn" ? "#f59e0b" : "#94a3b8" }}>
                 {flash === "ok" ? "✓ Recognized" : flash === "warn" ? "⚠ Unknown UPC" : "Scan Items"}
               </div>
-              <input ref={scanRef} style={{ ...S.inp, fontSize: 20, textAlign: "center", ...mono }} placeholder="Scan item..." autoFocus
-                onKeyDown={e => { if (e.key === "Enter") { handleItemScan(e.target.value); e.target.value = ""; } }} />
+              <input ref={scanRef} style={{ ...S.inp, fontSize: 20, textAlign: "center", ...mono }} placeholder="Scan item..." autoFocus onKeyDown={e => { if (e.key === "Enter") { handleItemScan(e.target.value); e.target.value = ""; } }} />
               {scanLog.length > 0 && <div style={{ marginTop: 6, fontSize: 11, color: "#64748b" }}>Last: <span style={mono}>{scanLog[0]?.upc}</span>{scanLog[0]?.sku && <span> — {scanLog[0].sku}</span>}</div>}
               <button style={{ ...S.btnSm, marginTop: 8, fontSize: 11 }} onClick={undoLast} disabled={scanLog.length === 0}>Undo Last</button>
             </div>
-
-            {/* BIN EXPECTED LIST */}
             {binExpected.length > 0 && (
               <div style={{ ...S.card, padding: 0 }}>
-                <div style={{ padding: "10px 14px", borderBottom: "1px solid rgba(255,255,255,0.06)", fontSize: 11, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: 0.5 }}>
-                  Expected in {currentBin} ({binExpected.length} items)
-                </div>
+                <div style={{ padding: "10px 14px", borderBottom: "1px solid rgba(255,255,255,0.06)", fontSize: 11, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: 0.5 }}>Expected in {currentBin} ({binExpected.length} items)</div>
                 <div style={{ maxHeight: 240, overflowY: "auto" }}>
                   {binExpected.map((item, i) => {
                     const sq = binScans[item.upc] || binScans[`SKU:${item.sku}`] || 0;
@@ -868,42 +759,23 @@ export default function App() {
               </div>
             )}
           </>)}
-
-          {/* Manual SKU entry for items without barcodes */}
           {showManualAdd && currentBin && (
             <div style={{ ...S.card, background: "rgba(245,158,11,0.04)", border: "1px solid rgba(245,158,11,0.25)" }}>
               <div style={{ fontSize: 11, fontWeight: 700, color: "#f59e0b", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>Manual Add by SKU</div>
-              <input
-                ref={manualRef}
-                style={{ ...S.inp, fontSize: 16, ...mono }}
-                placeholder="Type SKU and press Enter..."
-                value={manualSku}
-                onChange={e => setManualSku(e.target.value)}
-                onKeyDown={e => { if (e.key === "Enter") handleManualAdd(); }}
-                onClick={e => e.stopPropagation()}
-                autoFocus
-              />
+              <input ref={manualRef} style={{ ...S.inp, fontSize: 16, ...mono }} placeholder="Type SKU and press Enter..." value={manualSku} onChange={e => setManualSku(e.target.value)} onKeyDown={e => { if (e.key === "Enter") handleManualAdd(); }} onClick={e => e.stopPropagation()} autoFocus />
               <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                 <button style={{ ...S.btnSm, flex: 1, background: "rgba(245,158,11,0.15)", color: "#f59e0b", borderColor: "rgba(245,158,11,0.3)" }} onClick={handleManualAdd}>Add</button>
                 <button style={{ ...S.btnSm, flex: 1 }} onClick={() => { setShowManualAdd(false); setManualSku(""); scanRef.current?.focus(); }}>Cancel</button>
               </div>
             </div>
           )}
-
           {error && <div style={S.err}>{error}</div>}
-
           <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
             <button style={{ ...S.btnSec, padding: "10px 14px", flex: 1 }} onClick={() => { clearSession(); setPhase("setup"); }}>← Setup</button>
             {currentBin && !showManualAdd && (
-              <button style={{ ...S.btnSec, padding: "10px 14px", flex: 1, color: "#f59e0b", borderColor: "rgba(245,158,11,0.3)" }}
-                onClick={(e) => { e.stopPropagation(); setShowManualAdd(true); }}>
-                No Barcode?
-              </button>
+              <button style={{ ...S.btnSec, padding: "10px 14px", flex: 1, color: "#f59e0b", borderColor: "rgba(245,158,11,0.3)" }} onClick={(e) => { e.stopPropagation(); setShowManualAdd(true); }}>No Barcode?</button>
             )}
-            <button style={{ ...S.btnSec, padding: "10px 14px", flex: 1, color: "#ef4444", borderColor: "rgba(239,68,68,0.3)" }}
-              onClick={(e) => { e.stopPropagation(); restartCount(); }}>
-              Restart
-            </button>
+            <button style={{ ...S.btnSec, padding: "10px 14px", flex: 1, color: "#ef4444", borderColor: "rgba(239,68,68,0.3)" }} onClick={(e) => { e.stopPropagation(); restartCount(); }}>Restart</button>
           </div>
         </div>
       </div>
@@ -926,7 +798,8 @@ export default function App() {
         <button style={S.btnSm} onClick={() => setPhase("scanning")}>← Scan</button>
       </div>
       <div style={{ padding: "10px 16px" }}>
-        <div style={{ fontSize: 11, color: "#64748b", marginBottom: 8, ...mono }}>{classPath.map(c => c.name).join(" > ")} • {selectedLocation?.name}</div>
+        <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4, ...mono }}>{classPath.map(c => c.name).join(" > ")} • {selectedLocation?.name}</div>
+        <div style={{ fontSize: 11, color: "#475569", marginBottom: 8 }}>Bins counted: <span style={{ ...mono, color: "#818cf8" }}>{binHistory.join(", ") || "None"}</span></div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 6, marginBottom: 10 }}>
           {[["All", stats.total, "#e2e8f0", ""], ["OK", stats.matched, "#22c55e", "matched"], ["Var", stats.variance, "#f59e0b", "variance"], ["Rev", stats.review, "#ef4444", "review"], ["New", stats.unexpected, "#a78bfa", "unexpected"]].map(([l, v, c, f]) => (
             <div key={l} onClick={() => setFilter(filter === f ? "" : f)} style={{ ...S.card, padding: "6px 4px", marginBottom: 0, textAlign: "center", cursor: "pointer", opacity: filter && filter !== f ? 0.35 : 1, border: filter === f ? `1px solid ${c}` : "1px solid rgba(255,255,255,0.06)", transition: "all 0.15s" }}>
@@ -937,113 +810,49 @@ export default function App() {
         </div>
         {error && <div style={S.err}>{error}</div>}
         <div style={{ padding: "10px 14px", borderRadius: 8, fontSize: 12, lineHeight: 1.5, background: "rgba(59,130,246,0.06)", border: "1px solid rgba(59,130,246,0.2)", color: "#93c5fd", marginBottom: 10 }}>
-          <strong>{adjCount}</strong> item{adjCount !== 1 ? "s" : ""} need adjustment. Import via Transactions › Inventory Adjustment › <strong>Add</strong>.
+          <strong>{adjCount}</strong> item{adjCount !== 1 ? "s" : ""} need adjustment.
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 6 }}>
           <button style={S.btnSec} onClick={exportDetail}>Download Detail</button>
           <button style={{ ...S.btn, padding: "12px 16px" }} onClick={exportNS}>Download NS CSV</button>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
-          <button style={{ ...S.btnSec, background: "rgba(99,102,241,0.1)", borderColor: "rgba(99,102,241,0.3)", color: "#a5b4fc" }} onClick={() => shareCSV("detail")}>
-            Share Detail
-          </button>
-          <button style={{ ...S.btnSec, background: "rgba(99,102,241,0.1)", borderColor: "rgba(99,102,241,0.3)", color: "#a5b4fc" }} onClick={() => shareCSV("ns")}>
-            Share NS CSV
-          </button>
+          <button style={{ ...S.btnSec, background: "rgba(99,102,241,0.1)", borderColor: "rgba(99,102,241,0.3)", color: "#a5b4fc" }} onClick={() => shareCSV("detail")}>Share Detail</button>
+          <button style={{ ...S.btnSec, background: "rgba(99,102,241,0.1)", borderColor: "rgba(99,102,241,0.3)", color: "#a5b4fc" }} onClick={() => shareCSV("ns")}>Share NS CSV</button>
         </div>
         {emailTo && (
-          <button style={{ ...S.btnSec, marginBottom: 10, background: "rgba(34,197,94,0.08)", borderColor: "rgba(34,197,94,0.25)", color: "#86efac", textAlign: "center" }}
-            onClick={() => { setEmailType("detail"); setShowEmailModal(true); }}>
-            Email to {emailTo}
-          </button>
+          <button style={{ ...S.btnSec, marginBottom: 10, background: "rgba(34,197,94,0.08)", borderColor: "rgba(34,197,94,0.25)", color: "#86efac", textAlign: "center" }} onClick={() => { setEmailType("detail"); setShowEmailModal(true); }}>Email to {emailTo}</button>
         )}
-
-        {/* Submit to NetSuite */}
         {!submitResult?.success && (
-          <button
-            style={{ ...S.btn, marginBottom: 10, background: "#7c3aed", fontSize: 15 }}
-            onClick={() => setShowSubmitConfirm(true)}
-            disabled={submitting || adjCount === 0}
-          >
+          <button style={{ ...S.btn, marginBottom: 10, background: "#7c3aed", fontSize: 15 }} onClick={() => setShowSubmitConfirm(true)} disabled={submitting || adjCount === 0}>
             {submitting ? "Submitting..." : `Submit to NetSuite (${adjCount} items)`}
           </button>
         )}
-
-        {/* Submit Result */}
         {submitResult && (
-          <div style={{
-            padding: "14px 16px", borderRadius: 8, marginBottom: 10,
-            background: submitResult.success ? "rgba(34,197,94,0.08)" : "rgba(239,68,68,0.08)",
-            border: `1px solid ${submitResult.success ? "rgba(34,197,94,0.25)" : "rgba(239,68,68,0.25)"}`,
-          }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: submitResult.success ? "#22c55e" : "#ef4444", marginBottom: 6 }}>
-              {submitResult.success ? "✓ Adjustment Created" : "✗ Submission Failed"}
-            </div>
-            <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: submitResult.recordUrl ? 8 : 0 }}>
-              {submitResult.success ? submitResult.message : (submitResult.error || "Unknown error")}
-            </div>
-            {submitResult.details && !submitResult.success && (
-              <div style={{ fontSize: 11, color: "#f87171", marginTop: 4, ...mono, wordBreak: "break-all" }}>
-                {typeof submitResult.details === "string" ? submitResult.details : JSON.stringify(submitResult.details).slice(0, 300)}
-              </div>
-            )}
-            {submitResult.recordUrl && (
-              <a
-                href={submitResult.recordUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{
-                  display: "inline-block", padding: "10px 16px", borderRadius: 6,
-                  background: "rgba(59,130,246,0.15)", border: "1px solid rgba(59,130,246,0.3)",
-                  color: "#60a5fa", fontSize: 13, fontWeight: 600, textDecoration: "none",
-                }}
-              >
-                Open in NetSuite →
-              </a>
-            )}
+          <div style={{ padding: "14px 16px", borderRadius: 8, marginBottom: 10, background: submitResult.success ? "rgba(34,197,94,0.08)" : "rgba(239,68,68,0.08)", border: `1px solid ${submitResult.success ? "rgba(34,197,94,0.25)" : "rgba(239,68,68,0.25)"}` }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: submitResult.success ? "#22c55e" : "#ef4444", marginBottom: 6 }}>{submitResult.success ? "✓ Adjustment Created" : "✗ Submission Failed"}</div>
+            <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: submitResult.recordUrl ? 8 : 0 }}>{submitResult.success ? submitResult.message : (submitResult.error || "Unknown error")}</div>
+            {submitResult.details && !submitResult.success && <div style={{ fontSize: 11, color: "#f87171", marginTop: 4, ...mono, wordBreak: "break-all" }}>{typeof submitResult.details === "string" ? submitResult.details : JSON.stringify(submitResult.details).slice(0, 300)}</div>}
+            {submitResult.recordUrl && <a href={submitResult.recordUrl} target="_blank" rel="noopener noreferrer" style={{ display: "inline-block", padding: "10px 16px", borderRadius: 6, background: "rgba(59,130,246,0.15)", border: "1px solid rgba(59,130,246,0.3)", color: "#60a5fa", fontSize: 13, fontWeight: 600, textDecoration: "none" }}>Open in NetSuite →</a>}
           </div>
         )}
-
-        {/* Submit Confirmation Modal */}
         {showSubmitConfirm && (
-          <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}
-            onClick={() => setShowSubmitConfirm(false)}>
+          <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }} onClick={() => setShowSubmitConfirm(false)}>
             <div style={{ ...S.card, maxWidth: 380, width: "100%", background: "#1e293b" }} onClick={e => e.stopPropagation()}>
               <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 8, color: "#e2e8f0" }}>Submit to NetSuite?</div>
-              <div style={{ fontSize: 13, color: "#94a3b8", marginBottom: 16, lineHeight: 1.5 }}>
-                This will create an inventory adjustment with <strong style={{ color: "#e2e8f0" }}>{adjCount} line items</strong> at <strong style={{ color: "#e2e8f0" }}>{selectedLocation?.name}</strong>.
-                You can review and verify the transaction in NetSuite after it's created.
-              </div>
+              <div style={{ fontSize: 13, color: "#94a3b8", marginBottom: 16, lineHeight: 1.5 }}>This will create an inventory adjustment with <strong style={{ color: "#e2e8f0" }}>{adjCount} line items</strong> at <strong style={{ color: "#e2e8f0" }}>{selectedLocation?.name}</strong>.</div>
               <div style={{ ...S.card, padding: "10px 14px", marginBottom: 16, background: "rgba(255,255,255,0.03)" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
-                  <span style={{ color: "#64748b" }}>Location</span>
-                  <span style={{ ...mono }}>{selectedLocation?.name}</span>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
-                  <span style={{ color: "#64748b" }}>Account</span>
-                  <span style={{ ...mono }}>60050 Inventory Adjustment</span>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
-                  <span style={{ color: "#64748b" }}>Increases</span>
-                  <span style={{ ...mono, color: "#22c55e" }}>{comparison.filter(r => r.diff > 0).length} items</span>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
-                  <span style={{ color: "#64748b" }}>Decreases</span>
-                  <span style={{ ...mono, color: "#ef4444" }}>{comparison.filter(r => r.diff < 0).length} items</span>
-                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}><span style={{ color: "#64748b" }}>Location</span><span style={mono}>{selectedLocation?.name}</span></div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}><span style={{ color: "#64748b" }}>Increases</span><span style={{ ...mono, color: "#22c55e" }}>{comparison.filter(r => r.diff > 0).length}</span></div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}><span style={{ color: "#64748b" }}>Decreases</span><span style={{ ...mono, color: "#ef4444" }}>{comparison.filter(r => r.diff < 0).length}</span></div>
               </div>
-              <button style={{ ...S.btn, background: "#7c3aed", marginBottom: 8 }} onClick={submitToNetSuite} disabled={submitting}>
-                {submitting ? "Creating Adjustment..." : "Confirm & Submit"}
-              </button>
+              <button style={{ ...S.btn, background: "#7c3aed", marginBottom: 8 }} onClick={submitToNetSuite} disabled={submitting}>{submitting ? "Creating Adjustment..." : "Confirm & Submit"}</button>
               <button style={S.btnSec} onClick={() => setShowSubmitConfirm(false)}>Cancel</button>
             </div>
           </div>
         )}
-
-        {/* Email Modal */}
         {showEmailModal && (
-          <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}
-            onClick={() => setShowEmailModal(false)}>
+          <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }} onClick={() => setShowEmailModal(false)}>
             <div style={{ ...S.card, maxWidth: 360, width: "100%", background: "#1e293b" }} onClick={e => e.stopPropagation()}>
               <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 12 }}>Email CSV</div>
               <label style={S.lbl}>To</label>
@@ -1053,18 +862,10 @@ export default function App() {
               </select>
               <label style={S.lbl}>Which CSV?</label>
               <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-                <button onClick={() => setEmailType("detail")}
-                  style={{ ...S.btnSm, flex: 1, background: emailType === "detail" ? "rgba(59,130,246,0.15)" : undefined, color: emailType === "detail" ? "#60a5fa" : "#94a3b8", borderColor: emailType === "detail" ? "rgba(59,130,246,0.3)" : undefined }}>
-                  Count Detail
-                </button>
-                <button onClick={() => setEmailType("ns")}
-                  style={{ ...S.btnSm, flex: 1, background: emailType === "ns" ? "rgba(59,130,246,0.15)" : undefined, color: emailType === "ns" ? "#60a5fa" : "#94a3b8", borderColor: emailType === "ns" ? "rgba(59,130,246,0.3)" : undefined }}>
-                  NS Import
-                </button>
+                <button onClick={() => setEmailType("detail")} style={{ ...S.btnSm, flex: 1, background: emailType === "detail" ? "rgba(59,130,246,0.15)" : undefined, color: emailType === "detail" ? "#60a5fa" : "#94a3b8" }}>Count Detail</button>
+                <button onClick={() => setEmailType("ns")} style={{ ...S.btnSm, flex: 1, background: emailType === "ns" ? "rgba(59,130,246,0.15)" : undefined, color: emailType === "ns" ? "#60a5fa" : "#94a3b8" }}>NS Import</button>
               </div>
-              <button style={{ ...S.btn, background: "#22c55e" }} onClick={() => emailCSV(emailType)} disabled={emailSending}>
-                {emailSending ? "Sending..." : "Send Email"}
-              </button>
+              <button style={{ ...S.btn, background: "#22c55e" }} onClick={() => emailCSV(emailType)} disabled={emailSending}>{emailSending ? "Sending..." : "Send Email"}</button>
               <button style={{ ...S.btnSec, marginTop: 8 }} onClick={() => setShowEmailModal(false)}>Cancel</button>
             </div>
           </div>
@@ -1072,7 +873,6 @@ export default function App() {
         <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
           <div style={{ overflowY: "auto", maxHeight: "calc(100vh - 380px)" }}>
             {filtered.map((r, i) => {
-              const rowKey = getScansKey(r);
               const isEditing = editingItem === `${r.internalid}-${r.bin}`;
               return (
                 <div key={i} style={{ display: "flex", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid rgba(255,255,255,0.03)", background: i % 2 ? "rgba(255,255,255,0.01)" : "transparent" }}>
@@ -1085,59 +885,16 @@ export default function App() {
                     <div style={{ fontSize: 10, color: "#64748b" }}>{r.upc || "No UPC"}</div>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: 8 }}>
-                    {/* Minus button */}
-                    <button
-                      onClick={(e) => { e.stopPropagation(); adjustReviewQty(r, -1); }}
-                      style={{
-                        width: 32, height: 32, borderRadius: 6, border: "1px solid rgba(239,68,68,0.3)",
-                        background: "rgba(239,68,68,0.1)", color: "#ef4444", fontSize: 18, fontWeight: 700,
-                        cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
-                        fontFamily: "inherit", touchAction: "manipulation",
-                      }}
-                    >−</button>
-
-                    {/* Scanned qty - tap to edit */}
+                    <button onClick={(e) => { e.stopPropagation(); adjustReviewQty(r, -1); }} style={{ width: 32, height: 32, borderRadius: 6, border: "1px solid rgba(239,68,68,0.3)", background: "rgba(239,68,68,0.1)", color: "#ef4444", fontSize: 18, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "inherit", touchAction: "manipulation" }}>−</button>
                     {isEditing ? (
-                      <input
-                        autoFocus
-                        style={{ ...S.inp, width: 50, padding: "4px 6px", fontSize: 16, textAlign: "center", ...mono, minHeight: 32 }}
-                        value={editValue}
-                        onChange={e => setEditValue(e.target.value.replace(/[^0-9]/g, ""))}
-                        onKeyDown={e => { if (e.key === "Enter") setReviewQty(r, editValue); if (e.key === "Escape") setEditingItem(null); }}
-                        onBlur={() => setReviewQty(r, editValue)}
-                        onClick={e => e.stopPropagation()}
-                      />
+                      <input autoFocus style={{ ...S.inp, width: 50, padding: "4px 6px", fontSize: 16, textAlign: "center", ...mono, minHeight: 32 }} value={editValue} onChange={e => setEditValue(e.target.value.replace(/[^0-9]/g, ""))} onKeyDown={e => { if (e.key === "Enter") setReviewQty(r, editValue); if (e.key === "Escape") setEditingItem(null); }} onBlur={() => setReviewQty(r, editValue)} onClick={e => e.stopPropagation()} />
                     ) : (
-                      <div
-                        onClick={(e) => { e.stopPropagation(); setEditingItem(`${r.internalid}-${r.bin}`); setEditValue(String(r.scanned_qty)); }}
-                        style={{
-                          ...mono, fontSize: 16, fontWeight: 700, textAlign: "center", minWidth: 40,
-                          padding: "4px 6px", borderRadius: 6, cursor: "pointer",
-                          border: "1px dashed rgba(255,255,255,0.15)", color: "#e2e8f0",
-                        }}
-                        title="Tap to edit"
-                      >
-                        {r.scanned_qty}
-                      </div>
+                      <div onClick={(e) => { e.stopPropagation(); setEditingItem(`${r.internalid}-${r.bin}`); setEditValue(String(r.scanned_qty)); }} style={{ ...mono, fontSize: 16, fontWeight: 700, textAlign: "center", minWidth: 40, padding: "4px 6px", borderRadius: 6, cursor: "pointer", border: "1px dashed rgba(255,255,255,0.15)", color: "#e2e8f0" }}>{r.scanned_qty}</div>
                     )}
-
-                    {/* Plus button */}
-                    <button
-                      onClick={(e) => { e.stopPropagation(); adjustReviewQty(r, 1); }}
-                      style={{
-                        width: 32, height: 32, borderRadius: 6, border: "1px solid rgba(34,197,94,0.3)",
-                        background: "rgba(34,197,94,0.1)", color: "#22c55e", fontSize: 18, fontWeight: 700,
-                        cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
-                        fontFamily: "inherit", touchAction: "manipulation",
-                      }}
-                    >+</button>
-
-                    {/* Expected & diff */}
+                    <button onClick={(e) => { e.stopPropagation(); adjustReviewQty(r, 1); }} style={{ width: 32, height: 32, borderRadius: 6, border: "1px solid rgba(34,197,94,0.3)", background: "rgba(34,197,94,0.1)", color: "#22c55e", fontSize: 18, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "inherit", touchAction: "manipulation" }}>+</button>
                     <div style={{ textAlign: "right", marginLeft: 4, minWidth: 44 }}>
                       <div style={{ fontSize: 10, color: "#64748b" }}>/ {r.expected_qty}</div>
-                      <div style={{ ...mono, fontSize: 13, fontWeight: 700, color: r.diff === 0 ? "#22c55e" : r.diff > 0 ? "#f59e0b" : "#ef4444" }}>
-                        {r.diff > 0 ? `+${r.diff}` : r.diff}
-                      </div>
+                      <div style={{ ...mono, fontSize: 13, fontWeight: 700, color: r.diff === 0 ? "#22c55e" : r.diff > 0 ? "#f59e0b" : "#ef4444" }}>{r.diff > 0 ? `+${r.diff}` : r.diff}</div>
                     </div>
                   </div>
                 </div>
