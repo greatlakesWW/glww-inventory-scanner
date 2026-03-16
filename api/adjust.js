@@ -113,16 +113,20 @@ export default async function handler(req, res) {
       headers: {
         Authorization: authHeader,
         "Content-Type": "application/json",
-        Prefer: "respond-async, resultwait=60",
       },
       body: JSON.stringify(adjustmentBody),
     });
+
+    // Read response body first
+    let responseBody = null;
+    const responseText = await nsResponse.text();
+    try { responseBody = JSON.parse(responseText); } catch (e) { responseBody = responseText; }
 
     const locationHeader = nsResponse.headers.get("Location") || "";
     const idMatch = locationHeader.match(/\/(\d+)$/);
     const recordId = idMatch ? idMatch[1] : null;
 
-    console.log("NetSuite response:", nsResponse.status, "Location:", locationHeader, "Record ID:", recordId);
+    console.log("NetSuite response:", nsResponse.status, "Location:", locationHeader, "Body:", responseText.slice(0, 500));
 
     // Handle success statuses
     if (nsResponse.status === 204 || nsResponse.status === 201 || nsResponse.status === 200) {
@@ -136,41 +140,21 @@ export default async function handler(req, res) {
     }
 
     if (nsResponse.status === 202) {
-      // Async accepted — try to get result from response body
-      let body = {};
-      try { body = await nsResponse.json(); } catch (e) { /* empty body */ }
-
-      // Check if response has a job status URL
-      const statusUrl = body?.links?.find(l => l.rel === "status")?.href || locationHeader;
-      const recordUrl = recordId
-        ? `https://${config.accountId}.app.netsuite.com/app/accounting/transactions/invadjst.nl?id=${recordId}`
-        : null;
-
-      if (recordId) {
-        return res.status(200).json({
-          success: true, recordId, recordUrl,
-          message: `Inventory adjustment created (ID: ${recordId}).`,
-        });
-      }
-
-      // No record ID — tell user to check manually
+      // Async — return whatever info we have plus the response body
       return res.status(200).json({
-        success: true, recordId: null, recordUrl: null,
-        message: "Adjustment submitted and accepted by NetSuite. It may take a moment to appear. Check Transactions → Inventory → Adjust Inventory → List.",
+        success: false,
+        error: `NetSuite returned 202 (async). The adjustment may not have been created.`,
+        details: responseBody,
       });
     }
 
     // Handle errors
-    const errorBody = await nsResponse.text();
-    console.error("NetSuite adjust error:", nsResponse.status, errorBody);
+    console.error("NetSuite adjust error:", nsResponse.status, responseText);
 
-    let errorDetails;
-    try { errorDetails = JSON.parse(errorBody); } catch (e) { errorDetails = { raw: errorBody }; }
-
-    return res.status(nsResponse.status).json({
+    return res.status(nsResponse.status || 500).json({
       success: false,
       error: `NetSuite returned ${nsResponse.status}`,
-      details: errorDetails,
+      details: responseBody,
     });
   } catch (err) {
     console.error("Adjustment API error:", err);
