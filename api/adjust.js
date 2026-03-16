@@ -69,20 +69,21 @@ export default async function handler(req, res) {
     // Use binMap from frontend (built from expected data)
     const frontendBinMap = binMap || {};
 
-    // Step 1: For any remaining bins without IDs, look up via SuiteQL
+    // Step 1: For any remaining bins without IDs, look up via inventorybalance
     const binNamesNeeded = [...new Set(
       items.filter(i => !i.bin_id && i.bin_name && !frontendBinMap[i.bin_name]).map(i => i.bin_name)
     )];
     const lookedUpBins = {};
 
-    if (binNamesNeeded.length > 0) {
-      console.log("Looking up bin IDs for:", binNamesNeeded);
-      const escaped = binNamesNeeded.map(n => `'${n.replace(/'/g, "''")}'`).join(",");
-      const binRows = await runSuiteQL(config,
-        `SELECT id, binnumber FROM Bin WHERE location = ${locationId} AND binnumber IN (${escaped})`
+    for (const binName of binNamesNeeded) {
+      console.log("Looking up bin ID for:", binName);
+      const rows = await runSuiteQL(config,
+        `SELECT DISTINCT ib.binnumber AS bin_id FROM inventorybalance ib WHERE BUILTIN.DF(ib.binnumber) = '${binName.replace(/'/g, "''")}' AND ib.location = ${locationId} FETCH FIRST 1 ROWS ONLY`
       );
-      binRows.forEach(r => { lookedUpBins[r.binnumber] = r.id; });
-      console.log("Bin lookup results:", lookedUpBins);
+      if (rows[0]?.bin_id) {
+        lookedUpBins[binName] = rows[0].bin_id;
+        console.log("Found bin ID:", binName, "->", rows[0].bin_id);
+      }
     }
 
     console.log("Frontend binMap keys:", Object.keys(frontendBinMap).slice(0, 10));
