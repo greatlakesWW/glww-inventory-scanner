@@ -133,8 +133,12 @@ export default function App() {
 
   const binExpected = useMemo(() => {
     if (!currentBin) return [];
-    return expected.filter(i => i.bin_number && i.bin_number.toUpperCase() === currentBin.toUpperCase());
-  }, [expected, currentBin]);
+    return expected.filter(i => {
+      if (!i.bin_number || i.bin_number.toUpperCase() !== currentBin.toUpperCase()) return false;
+      if (selectedPrefixes !== null && !selectedPrefixes.includes(getSkuPrefix(i.sku))) return false;
+      return true;
+    });
+  }, [expected, currentBin, selectedPrefixes]);
 
   const currentLevelClasses = useMemo(() => {
     const parentId = classPath.length > 0 ? classPath[classPath.length - 1].id : null;
@@ -306,7 +310,16 @@ export default function App() {
   // ── COMPARISON ──
   const getComparison = useCallback(() => {
     const rows = []; const done = new Set();
-    expected.forEach(item => {
+    // Filter expected by selected prefixes and scanned bins
+    const filteredExpected = expected.filter(item => {
+      // Prefix filter
+      if (selectedPrefixes !== null && !selectedPrefixes.includes(getSkuPrefix(item.sku))) return false;
+      // Bin filter: only include items from bins we actually scanned
+      const bin = item.bin_number || "";
+      if (bin && binHistory.length > 0 && !binHistory.some(b => b.toUpperCase() === bin.toUpperCase())) return false;
+      return true;
+    });
+    filteredExpected.forEach(item => {
       const upc = item.upc || ""; const bin = item.bin_number || "";
       const binId = item.bin_id || "";
       // Check for UPC-keyed scan first, then SKU-keyed
@@ -330,7 +343,7 @@ export default function App() {
       }
     });
     return rows;
-  }, [expected, scans, upcLookup, skuLookup]);
+  }, [expected, scans, upcLookup, skuLookup, selectedPrefixes, binHistory]);
 
   // ── CSV EXPORTS ──
   const today = () => new Date().toISOString().slice(0, 10);
