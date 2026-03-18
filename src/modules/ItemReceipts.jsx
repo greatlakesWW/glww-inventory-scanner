@@ -189,12 +189,12 @@ export default function ItemReceipts({ onBack }) {
         SELECT tl.id AS line_id, tl.linesequencenumber AS line_number, tl.item AS item_id,
           BUILTIN.DF(tl.item) AS item_name, tl.quantity AS ordered_qty,
           tl.quantityreceived AS received_qty,
-          (tl.quantity - COALESCE(tl.quantityreceived, 0)) AS remaining_qty,
+          (tl.quantity - NVL(tl.quantityreceived, 0)) AS remaining_qty,
           item.itemid AS sku, item.upccode AS upc
         FROM transactionline tl JOIN item ON tl.item = item.id
         WHERE tl.transaction = ${poId} AND tl.mainline = 'F'
-          AND tl.itemtype IN ('InvtPart', 'Assembly', 'Kit')
-          AND (tl.quantity - COALESCE(tl.quantityreceived, 0)) > 0
+          AND tl.item IS NOT NULL
+          AND (tl.quantity - NVL(tl.quantityreceived, 0)) > 0
         ORDER BY item.itemid
       `);
       setPOLines(rows);
