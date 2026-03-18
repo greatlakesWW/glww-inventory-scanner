@@ -171,7 +171,9 @@ export default function ItemReceipts({ onBack }) {
           BUILTIN.DF(t.entity) AS vendor_name, BUILTIN.DF(t.status) AS status,
           BUILTIN.DF(t.location) AS location
         FROM transaction t
-        WHERE t.type = 'PurchOrd' AND t.status IN ('PurchOrd:B', 'PurchOrd:D', 'PurchOrd:E')
+        WHERE t.type = 'PurchOrd'
+          AND t.status NOT IN ('PurchOrd:G', 'PurchOrd:H')
+          AND t.voided = 'F'
         ORDER BY t.trandate DESC
       `);
       setOpenPOs(rows);
