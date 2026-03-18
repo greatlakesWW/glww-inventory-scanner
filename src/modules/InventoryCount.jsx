@@ -1,9 +1,12 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import {
   suiteql, suiteqlAll, beep, beepOk, beepWarn, beepBin, beepExtra,
-  ST, Badge, S, FONT, mono, Logo,
+  ST, Badge, S, FONT, ANIMATIONS, mono, fadeIn, Logo,
   loadSession, saveSession, clearSession,
+  PulsingDot, ResumePrompt,
 } from "../shared";
+import { useItemDetailDrawer } from "../components/ItemDetail";
+import { logActivity } from "../activityLog";
 
 // ═══════════════════════════════════════════════════════════
 // HELPERS
@@ -22,7 +25,11 @@ const SESSION_KEY = "glww_inventory_count";
 export default function InventoryCount({ onBack }) {
   const saved = useRef(loadSession(SESSION_KEY)).current;
 
-  const [phase, setPhase] = useState(saved?.phase || "setup");
+  // Item Detail Drawer
+  const hasSavedSession = saved && saved.phase && saved.phase !== "setup";
+
+  const [showResume, setShowResume] = useState(hasSavedSession);
+  const [phase, setPhase] = useState(hasSavedSession ? "setup" : (saved?.phase || "setup"));
   const [loading, setLoading] = useState(false);
   const [loadMsg, setLoadMsg] = useState("");
   const [error, setError] = useState(null);
@@ -53,6 +60,7 @@ export default function InventoryCount({ onBack }) {
   const [emailTo, setEmailTo] = useState(saved?.emailTo || "");
 
   const scanRef = useRef(null);
+  const { openDrawer, DrawerComponent } = useItemDetailDrawer(scanRef);
   const binRef = useRef(null);
 
   // Lookup mode
@@ -381,6 +389,7 @@ export default function InventoryCount({ onBack }) {
     const h = "Internal ID,External ID,SKU,Item Name,UPC,Bin,Bin ID,Expected Qty,Scanned Qty,Difference,Status\n";
     const b = rows.map(r => `"${r.internalid}","${r.externalid || ""}","${r.sku}","${(r.itemname || "").replace(/"/g, '""')}","${r.upc}","${r.bin}","${r.bin_id || ""}",${r.expected_qty},${r.scanned_qty},${r.diff},"${ST[r.status].l}"`).join("\n");
     dl(h + b, `count_detail_${(selectedLocation?.name || "").replace(/\s+/g, "_")}_${today()}.csv`);
+    try { logActivity({ module: "inventory-count", action: "count-exported", status: "success", details: `${selectedLocation?.name} — ${classPath.map(c => c.name).join(" > ")} — ${rows.length} items, download`, sourceDocument: selectedLocation?.name }); } catch (_) { }
   };
 
   const exportNS = () => {
@@ -396,6 +405,7 @@ export default function InventoryCount({ onBack }) {
       `"${extId}","60050 Inventory Adjustment","${selectedLocation?.name}","Great Lakes Work Wear","${dateStr}","${periodStr}",${r.internalid || ""},"${r.externalid || ""}","${r.sku}",${r.diff},"${selectedLocation?.name}","${r.bin || ""}",${r.diff}`
     ).join("\n");
     dl(h + b, `ns_import_${locName}_${today()}.csv`);
+    try { logActivity({ module: "inventory-count", action: "count-adjustment-exported", status: "success", details: `${selectedLocation?.name} — ${rows.length} adjustments, download`, sourceDocument: selectedLocation?.name }); } catch (_) { }
   };
 
   // ── SHARE / EMAIL ──
@@ -439,6 +449,7 @@ export default function InventoryCount({ onBack }) {
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
       try {
         await navigator.share({ title: `Inventory Count - ${selectedLocation?.name}`, text: `${classPath.map(c => c.name).join(" > ")} count at ${selectedLocation?.name} (${today()})`, files: [file] });
+        try { logActivity({ module: "inventory-count", action: type === "ns" ? "count-adjustment-exported" : "count-exported", status: "success", details: `${selectedLocation?.name} — shared`, sourceDocument: selectedLocation?.name }); } catch (_) { }
       } catch (e) { if (e.name !== "AbortError") setError("Share failed: " + e.message); }
     } else {
       const url = URL.createObjectURL(file);
@@ -462,11 +473,13 @@ export default function InventoryCount({ onBack }) {
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || "Send failed");
       setShowEmailModal(false); setError(null);
+      try { logActivity({ module: "inventory-count", action: type === "ns" ? "count-adjustment-exported" : "count-exported", status: "success", details: `${selectedLocation?.name} — emailed to ${emailTo.trim()}`, sourceDocument: selectedLocation?.name }); } catch (_) { }
     } catch (e) { setError("Email failed: " + e.message); }
     finally { setEmailSending(false); }
   };
 
   const submitToNetSuite = async () => {
+    if (submitting) return; // Double-tap guard
     const rows = getComparison().filter(r => r.diff !== 0);
     if (rows.length === 0) { setError("All counts match."); return; }
     setSubmitting(true); setSubmitResult(null); setError(null);
@@ -487,6 +500,7 @@ export default function InventoryCount({ onBack }) {
       if (data.success) {
         setSubmitResult({ success: true, message: data.message, recordUrl: data.recordUrl, recordId: data.recordId });
         setShowSubmitConfirm(false);
+        clearSession(SESSION_KEY); // Clear session after successful submit
       } else {
         setSubmitResult({ success: false, error: data.error || "Unknown error", details: data.details });
       }
@@ -535,7 +549,7 @@ export default function InventoryCount({ onBack }) {
 
     return (
       <div style={S.root}>
-        <style>{FONT}</style>
+        <style>{FONT}{ANIMATIONS}</style>
         <div style={S.hdr}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <Logo /><span style={{ fontSize: 15, fontWeight: 700 }}>Inventory Lookup</span>
@@ -553,7 +567,7 @@ export default function InventoryCount({ onBack }) {
               autoFocus
               onKeyDown={e => { if (e.key === "Enter") { handleLookup(e.target.value); e.target.value = ""; } }}
             />
-            {lookupLoading && <div style={{ marginTop: 8, fontSize: 12, color: "#93c5fd" }}>Looking up...</div>}
+            {lookupLoading && <PulsingDot color="#22c55e" label="Looking up..." />}
           </div>
 
           {error && <div style={S.err}>{error}</div>}
@@ -645,16 +659,20 @@ export default function InventoryCount({ onBack }) {
     const hasData = classes.length > 0 || locations.length > 0;
     return (
       <div style={S.root}>
-        <style>{FONT}</style>
+        <style>{FONT}{ANIMATIONS}</style>
         <div style={S.hdr}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}><Logo /><span style={{ fontSize: 15, fontWeight: 700 }}>Inventory Count</span></div>
           <button style={S.btnSm} onClick={() => { clearSession(SESSION_KEY); onBack(); }}>← Home</button>
         </div>
-        <div style={{ padding: 16 }}>
+        <div style={{ padding: 16, ...fadeIn }}>
+          {/* Session resume */}
+          {showResume ? (
+            <ResumePrompt moduleName="Count" onResume={() => { setShowResume(false); setPhase(saved?.phase || "setup"); }} onFresh={() => { setShowResume(false); clearSession(SESSION_KEY); setPhase("setup"); setClasses([]); setLocations([]); setClassPath([]); setSelectedClassId(null); setSelectedLocation(null); setExpected([]); setScans({}); setScanLog([]); setBinHistory([]); setCurrentBin(null); }} />
+          ) : (<>
           {!hasData && (
             <div style={S.card}>
               <p style={{ fontSize: 14, color: "#94a3b8", marginBottom: 14 }}>Connect to NetSuite to load classes and locations.</p>
-              {loading && <div style={S.load}>{loadMsg}</div>}
+              {loading && <PulsingDot color="#3b82f6" label={loadMsg || "Loading..."} />}
               {error && <div style={S.err}>{error}</div>}
               <button style={S.btn} onClick={loadSetupData} disabled={loading}>{loading ? "Connecting..." : "Connect to NetSuite"}</button>
             </div>
@@ -735,6 +753,7 @@ export default function InventoryCount({ onBack }) {
             <button style={S.btnSec} onClick={() => { setExpected([]); setPhase("scanning"); }}>Skip — Scan Only</button>
             <button style={{ ...S.btnSec, marginTop: 8, background: "rgba(34,197,94,0.06)", borderColor: "rgba(34,197,94,0.2)", color: "#86efac" }} onClick={() => setPhase("lookup")}>🔍 Inventory Lookup</button>
           </>)}
+          </>)}
         </div>
       </div>
     );
@@ -764,7 +783,7 @@ export default function InventoryCount({ onBack }) {
 
     return (
       <div style={S.root}>
-        <style>{FONT}</style>
+        <style>{FONT}{ANIMATIONS}</style>
         <div style={S.hdr}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <Logo /><span style={{ fontSize: 15, fontWeight: 700 }}>Select Styles</span>
@@ -855,7 +874,7 @@ export default function InventoryCount({ onBack }) {
 
     return (
       <div style={S.root} onClick={() => { if (!currentBin) binRef.current?.focus(); else scanRef.current?.focus(); }}>
-        <style>{FONT}</style>
+        <style>{FONT}{ANIMATIONS}</style>
         <div style={S.hdr}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <Logo />
@@ -925,7 +944,7 @@ export default function InventoryCount({ onBack }) {
                     const eq = Number(item.expected_qty) || 0;
                     const done = sq >= eq;
                     return (
-                      <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", borderBottom: "1px solid rgba(255,255,255,0.03)", background: done ? "rgba(34,197,94,0.04)" : "transparent", opacity: done ? 0.6 : 1 }}>
+                      <div key={i} onClick={(e) => { e.stopPropagation(); openDrawer(item.internalid); }} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", borderBottom: "1px solid rgba(255,255,255,0.03)", background: done ? "rgba(34,197,94,0.04)" : "transparent", opacity: done ? 0.6 : 1, cursor: "pointer", touchAction: "manipulation" }}>
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ fontSize: 13, fontWeight: 600, ...mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textDecoration: done ? "line-through" : "none", color: done ? "#22c55e" : "#e2e8f0" }}>{item.sku}</div>
                           <div style={{ fontSize: 11, color: "#64748b" }}>{item.upc || "No UPC"}</div>
@@ -960,6 +979,7 @@ export default function InventoryCount({ onBack }) {
             <button style={{ ...S.btnSec, padding: "10px 14px", flex: 1, color: "#ef4444", borderColor: "rgba(239,68,68,0.3)" }} onClick={(e) => { e.stopPropagation(); restartCount(); }}>Restart</button>
           </div>
         </div>
+        {DrawerComponent}
       </div>
     );
   }
@@ -974,7 +994,7 @@ export default function InventoryCount({ onBack }) {
 
   return (
     <div style={S.root}>
-      <style>{FONT}</style>
+      <style>{FONT}{ANIMATIONS}</style>
       <div style={S.hdr}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}><Logo /><span style={{ fontSize: 14, fontWeight: 700 }}>Review</span></div>
         <button style={S.btnSm} onClick={() => setPhase("scanning")}>← Scan</button>
@@ -1057,7 +1077,7 @@ export default function InventoryCount({ onBack }) {
             {filtered.map((r, i) => {
               const isEditing = editingItem === `${r.internalid}-${r.bin}`;
               return (
-                <div key={i} style={{ display: "flex", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid rgba(255,255,255,0.03)", background: i % 2 ? "rgba(255,255,255,0.01)" : "transparent" }}>
+                <div key={i} onClick={() => openDrawer(r.internalid)} style={{ display: "flex", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid rgba(255,255,255,0.03)", background: i % 2 ? "rgba(255,255,255,0.01)" : "transparent", cursor: "pointer", touchAction: "manipulation" }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
                       <Badge s={r.status} />
@@ -1085,6 +1105,7 @@ export default function InventoryCount({ onBack }) {
             {filtered.length === 0 && <div style={{ padding: 32, textAlign: "center", color: "#475569" }}>No items match filter.</div>}
           </div>
         </div>
+        {DrawerComponent}
       </div>
     </div>
   );

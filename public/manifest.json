@@ -1,6 +1,6 @@
 {
-  "name": "GLWW Inventory Scanner",
-  "short_name": "Scanner",
+  "name": "GLWW Warehouse",
+  "short_name": "Warehouse",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0a0e17",

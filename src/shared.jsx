@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 
 // ═══════════════════════════════════════════════════════════
 // API HELPERS
@@ -52,6 +52,28 @@ export const nsRecord = async (method, path, body = null) => {
 };
 
 // ═══════════════════════════════════════════════════════════
+// UTILITIES
+// ═══════════════════════════════════════════════════════════
+/** Batch IDs into groups of `max` for SuiteQL IN clauses */
+export const batchIds = (ids, max = 200) => {
+  const batches = [];
+  for (let i = 0; i < ids.length; i += max) batches.push(ids.slice(i, i + max));
+  return batches;
+};
+
+/** Run a SuiteQL query for each batch of IDs (replacing {IDS} placeholder) and merge results */
+export const suiteqlBatched = async (queryTemplate, ids, max = 200) => {
+  const batches = batchIds(ids, max);
+  let all = [];
+  for (const batch of batches) {
+    const q = queryTemplate.replace("{IDS}", batch.join(","));
+    const rows = await suiteql(q);
+    all = all.concat(rows);
+  }
+  return all;
+};
+
+// ═══════════════════════════════════════════════════════════
 // AUDIO
 // ═══════════════════════════════════════════════════════════
 export const beep = (freq, dur = 0.12, type = "sine") => {
@@ -95,7 +117,13 @@ export const Badge = ({ s }) => {
 // STYLES (5.5" mobile-first)
 // ═══════════════════════════════════════════════════════════
 export const FONT = `@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@400;500;600;700&display=swap');`;
+export const ANIMATIONS = `
+@keyframes pulsingDot { 0%,80%,100% { opacity: 0.3; transform: scale(0.8); } 40% { opacity: 1; transform: scale(1.2); } }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+`;
 export const mono = { fontFamily: "'JetBrains Mono', monospace" };
+export const fadeIn = { animation: "fadeIn 150ms ease-out" };
 export const S = {
   root: { minHeight: "100vh", background: "#0a0e17", color: "#e2e8f0", fontFamily: "'DM Sans', sans-serif", fontSize: 14, WebkitTapHighlightColor: "transparent" },
   hdr: { background: "#111827", borderBottom: "1px solid rgba(255,255,255,0.06)", padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, zIndex: 50 },
@@ -121,11 +149,67 @@ export const saveSession = (key, d) => { try { localStorage.setItem(key, JSON.st
 export const clearSession = (key) => { try { localStorage.removeItem(key); } catch (e) { } };
 
 // ═══════════════════════════════════════════════════════════
-// SHARED COMPONENT: ScanInput
+// HOOK: Click-anywhere re-focus for scan inputs
+// ═══════════════════════════════════════════════════════════
+export const useScanRefocus = (ref, active = true) => {
+  useEffect(() => {
+    if (!active) return;
+    const handler = () => { setTimeout(() => ref.current?.focus(), 50); };
+    document.addEventListener("click", handler);
+    return () => document.removeEventListener("click", handler);
+  }, [ref, active]);
+};
+
+// ═══════════════════════════════════════════════════════════
+// SHARED COMPONENT: PulsingDot (loading indicator)
+// ═══════════════════════════════════════════════════════════
+export const PulsingDot = ({ color = "#3b82f6", label = "Loading..." }) => (
+  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: "12px 14px" }}>
+    <div style={{ display: "flex", gap: 4 }}>
+      {[0, 1, 2].map(i => (
+        <div key={i} style={{
+          width: 8, height: 8, borderRadius: "50%", background: color,
+          animation: `pulsingDot 1.2s ease-in-out ${i * 0.2}s infinite`,
+        }} />
+      ))}
+    </div>
+    <span style={{ fontSize: 13, color: "#93c5fd" }}>{label}</span>
+  </div>
+);
+
+// ═══════════════════════════════════════════════════════════
+// SHARED COMPONENT: ResumePrompt
+// ═══════════════════════════════════════════════════════════
+export const ResumePrompt = ({ onResume, onFresh, moduleName = "session" }) => (
+  <div style={{ ...S.card, background: "rgba(59,130,246,0.06)", border: "1px solid rgba(59,130,246,0.3)", textAlign: "center", padding: 24 }}>
+    <div style={{ fontSize: 15, fontWeight: 700, color: "#e2e8f0", marginBottom: 8 }}>Resume {moduleName}?</div>
+    <div style={{ fontSize: 13, color: "#94a3b8", marginBottom: 16 }}>You have a previous session in progress.</div>
+    <button style={{ ...S.btn, marginBottom: 8 }} onClick={onResume}>Resume Session</button>
+    <button style={S.btnSec} onClick={onFresh}>Start Fresh</button>
+  </div>
+);
+
+// ═══════════════════════════════════════════════════════════
+// SHARED COMPONENT: ScanInput (with rapid scan queue)
 // ═══════════════════════════════════════════════════════════
 export const ScanInput = ({ onScan, placeholder = "Scan...", flash = null, inputRef }) => {
   const localRef = useRef(null);
   const ref = inputRef || localRef;
+  const lastScanRef = useRef(0);
+  const queueRef = useRef([]);
+  const processingRef = useRef(false);
+
+  const processQueue = useCallback(() => {
+    if (processingRef.current || queueRef.current.length === 0) return;
+    processingRef.current = true;
+    const val = queueRef.current.shift();
+    onScan(val);
+    lastScanRef.current = Date.now();
+    setTimeout(() => {
+      processingRef.current = false;
+      processQueue();
+    }, 100);
+  }, [onScan]);
 
   const flashColor = flash === "ok" ? "rgba(34,197,94,0.5)"
     : flash === "warn" ? "rgba(245,158,11,0.5)"
@@ -154,7 +238,14 @@ export const ScanInput = ({ onScan, placeholder = "Scan...", flash = null, input
         if (e.key === "Enter") {
           const val = e.target.value.trim();
           if (val) {
-            onScan(val);
+            const now = Date.now();
+            if (now - lastScanRef.current < 100) {
+              queueRef.current.push(val);
+              processQueue();
+            } else {
+              onScan(val);
+              lastScanRef.current = now;
+            }
             e.target.value = "";
           }
           setTimeout(() => ref.current?.focus(), 50);
