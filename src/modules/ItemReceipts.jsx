@@ -186,19 +186,18 @@ export default function ItemReceipts({ onBack }) {
     setLoading(true); setError(null); setLoadMsg("Loading PO lines...");
     try {
       const rows = await suiteql(`
-        SELECT tl.id AS line_id, tl.linesequencenumber AS line_number, tl.item AS item_id,
+        SELECT tl.id AS line_id, tl.item AS item_id,
           BUILTIN.DF(tl.item) AS item_name, tl.quantity AS ordered_qty,
-          tl.quantityreceived AS received_qty,
-          (tl.quantity - NVL(tl.quantityreceived, 0)) AS remaining_qty,
           item.itemid AS sku, item.upccode AS upc
         FROM transactionline tl JOIN item ON tl.item = item.id
         WHERE tl.transaction = ${poId} AND tl.mainline = 'F'
-          AND tl.item IS NOT NULL
-          AND (tl.quantity - NVL(tl.quantityreceived, 0)) > 0
+          AND tl.item IS NOT NULL AND tl.quantity > 0
         ORDER BY item.itemid
       `);
-      setPOLines(rows);
-      if (rows.length === 0) setError("No unreceived lines on this PO.");
+      // Add remaining_qty (= ordered, since we pulled all non-zero lines)
+      const lines = rows.map(r => ({ ...r, remaining_qty: Number(r.ordered_qty) || 0, received_qty: 0 }));
+      setPOLines(lines);
+      if (lines.length === 0) setError("No lines on this PO.");
       else setPhase("receive");
     } catch (e) { setError(e.message); }
     finally { setLoading(false); setLoadMsg(""); }
