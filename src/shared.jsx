@@ -233,7 +233,6 @@ export const ScanInput = ({ onScan, placeholder = "Scan...", flash = null, input
       autoComplete="off"
       autoCapitalize="off"
       spellCheck={false}
-      inputMode="none"
       onKeyDown={e => {
         if (e.key === "Enter") {
           const val = e.target.value.trim();
