@@ -14,7 +14,6 @@ const LOCATION_IDS = { salesFloor: 1, backroom: 2, warehouse: 3 }; // adjust if 
 export default function ItemLookup({ onBack }) {
   const [item, setItem] = useState(null);
   const [inventory, setInventory] = useState([]);
-  const [stockLevels, setStockLevels] = useState([]);
   const [loading, setLoading] = useState(false);
   const [invLoading, setInvLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -29,45 +28,29 @@ export default function ItemLookup({ onBack }) {
     item.id AS internalid,
     item.itemid AS sku,
     item.displayname AS item_name,
-    item.description AS description,
     item.upccode AS upc,
     BUILTIN.DF(item.class) AS class_name,
-    BUILTIN.DF(item.department) AS department,
-    item.cost AS purchase_price,
-    item.baseprice AS base_price,
-    item.totalquantityonhand AS total_qty_on_hand
+    BUILTIN.DF(item.department) AS department
   `;
 
   // ── LOAD INVENTORY FOR AN ITEM ──
   const loadInventory = useCallback(async (itemId) => {
     setInvLoading(true);
     try {
-      const [inv, levels] = await Promise.all([
-        suiteql(`
-          SELECT
-            ib.location AS location_id,
-            BUILTIN.DF(ib.location) AS location_name,
-            BUILTIN.DF(ib.binnumber) AS bin_number,
-            ib.binnumber AS bin_id,
-            ib.quantityonhand AS qty_on_hand,
-            ib.quantityavailable AS qty_available
-          FROM inventorybalance ib
-          WHERE ib.item = ${itemId}
-            AND ib.quantityonhand > 0
-          ORDER BY BUILTIN.DF(ib.location), BUILTIN.DF(ib.binnumber)
-        `),
-        suiteql(`
-          SELECT
-            ail.location AS location_id,
-            BUILTIN.DF(ail.location) AS location_name,
-            ail.preferredstocklevel AS preferred_level,
-            ail.reorderpoint AS reorder_point
-          FROM AggregateItemLocation ail
-          WHERE ail.item = ${itemId}
-        `),
-      ]);
+      const inv = await suiteql(`
+        SELECT
+          ib.location AS location_id,
+          BUILTIN.DF(ib.location) AS location_name,
+          BUILTIN.DF(ib.binnumber) AS bin_number,
+          ib.binnumber AS bin_id,
+          ib.quantityonhand AS qty_on_hand,
+          ib.quantityavailable AS qty_available
+        FROM inventorybalance ib
+        WHERE ib.item = ${itemId}
+          AND ib.quantityonhand > 0
+        ORDER BY BUILTIN.DF(ib.location), BUILTIN.DF(ib.binnumber)
+      `);
       setInventory(inv);
-      setStockLevels(levels);
     } catch (e) {
       setError(`Inventory load failed: ${e.message}`);
     } finally { setInvLoading(false); }
@@ -76,7 +59,7 @@ export default function ItemLookup({ onBack }) {
   // ── SCAN HANDLER ──
   const handleScan = useCallback(async (val) => {
     const v = val.trim(); if (!v) return;
-    setLoading(true); setError(null); setItem(null); setInventory([]); setStockLevels([]);
+    setLoading(true); setError(null); setItem(null); setInventory([]);
 
     const escaped = v.replace(/'/g, "''");
 
@@ -110,7 +93,7 @@ export default function ItemLookup({ onBack }) {
 
       // Load inventory in parallel (two-stage loading)
       loadInventory(found.internalid);
-      try { logActivity({ module: "item-lookup", action: "item-lookup", status: "success", details: `${found.sku} — ${found.item_name}`, sourceDocument: found.upc || found.sku }); } catch (_) { }
+      try { logActivity({ module: "item-lookup", action: "item-lookup", status: "success", details: `${found.sku} — ${found.item_name || ""}`, sourceDocument: found.upc || found.sku }); } catch (_) { }
     } catch (e) {
       setError(`Lookup failed: ${e.message}`);
       beepWarn(); doFlash("warn");
@@ -120,7 +103,7 @@ export default function ItemLookup({ onBack }) {
 
   // ── RESTORE FROM HISTORY ──
   const showFromHistory = useCallback((h) => {
-    setItem(h); setError(null); setInventory([]); setStockLevels([]);
+    setItem(h); setError(null); setInventory([]);
     loadInventory(h.internalid);
   }, [loadInventory]);
 
@@ -138,11 +121,6 @@ export default function ItemLookup({ onBack }) {
   const totalOnHand = locationGroups.reduce((a, g) => a + g.total, 0);
   const totalAvailable = locationGroups.reduce((a, g) => a + g.totalAvail, 0);
 
-  // Stock levels lookup by location_id
-  const levelsMap = {};
-  stockLevels.forEach(l => { levelsMap[String(l.location_id)] = l; });
-
-  const fmt = (v) => v != null && v !== "" ? `$${Number(v).toFixed(2)}` : null;
 
   return (
     <div style={S.root}>
@@ -187,28 +165,6 @@ export default function ItemLookup({ onBack }) {
                 )}
               </div>
 
-              {/* Pricing (muted) */}
-              {(fmt(item.purchase_price) || fmt(item.base_price)) && (
-                <div style={{
-                  display: "flex", gap: 16, marginBottom: 14, padding: "8px 12px",
-                  background: "rgba(255,255,255,0.03)", borderRadius: 8,
-                  border: "1px solid rgba(255,255,255,0.06)",
-                }}>
-                  {fmt(item.purchase_price) && (
-                    <div>
-                      <div style={{ fontSize: 9, color: "#475569", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 600 }}>Cost</div>
-                      <div style={{ fontSize: 13, color: "#94a3b8", ...mono }}>{fmt(item.purchase_price)}</div>
-                    </div>
-                  )}
-                  {fmt(item.base_price) && (
-                    <div>
-                      <div style={{ fontSize: 9, color: "#475569", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 600 }}>Retail</div>
-                      <div style={{ fontSize: 13, color: "#94a3b8", ...mono }}>{fmt(item.base_price)}</div>
-                    </div>
-                  )}
-                </div>
-              )}
-
               {/* Inventory breakdown */}
               <div style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 600, marginBottom: 8 }}>
                 Inventory by Location
@@ -226,12 +182,6 @@ export default function ItemLookup({ onBack }) {
               )}
 
               {locationGroups.map(loc => {
-                const level = levelsMap[String(loc.id)];
-                const preferred = level ? Number(level.preferred_level) || 0 : 0;
-                const reorder = level ? Number(level.reorder_point) || 0 : 0;
-                const belowReorder = reorder > 0 && loc.total <= reorder;
-                const belowPreferred = preferred > 0 && loc.total < preferred && !belowReorder;
-
                 return (
                   <div key={loc.name} style={{
                     background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)",
@@ -240,20 +190,10 @@ export default function ItemLookup({ onBack }) {
                     {/* Location header */}
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
                       <div style={{ fontSize: 13, fontWeight: 700, color: "#e2e8f0" }}>{loc.name}</div>
-                      <div style={{ fontSize: 14, fontWeight: 700, ...mono, color: belowReorder ? "#ef4444" : belowPreferred ? "#f59e0b" : "#22c55e" }}>
+                      <div style={{ fontSize: 14, fontWeight: 700, ...mono, color: "#22c55e" }}>
                         {loc.total} total
                       </div>
                     </div>
-
-                    {/* Stock level info */}
-                    {level && (preferred > 0 || reorder > 0) && (
-                      <div style={{ fontSize: 10, color: "#64748b", marginBottom: 6 }}>
-                        {preferred > 0 && <span>preferred: {preferred}</span>}
-                        {preferred > 0 && reorder > 0 && <span> · </span>}
-                        {reorder > 0 && <span>reorder: {reorder}</span>}
-                        {belowReorder && <span style={{ color: "#ef4444", fontWeight: 700, marginLeft: 6 }}>⚠ Below reorder point</span>}
-                      </div>
-                    )}
 
                     {/* Bin rows */}
                     {loc.bins.map((bin, i) => {
@@ -330,7 +270,7 @@ export default function ItemLookup({ onBack }) {
                     <div style={{ fontSize: 11, color: "#64748b", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{h.item_name}</div>
                   </div>
                   <div style={{ textAlign: "right", marginLeft: 12, flexShrink: 0 }}>
-                    <div style={{ fontSize: 14, fontWeight: 700, ...mono, color: "#22c55e" }}>{h.total_qty_on_hand ?? 0}</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, ...mono, color: "#22c55e" }}>{h.total_qty ?? "—"}</div>
                     <div style={{ fontSize: 9, color: "#475569" }}>
                       {h._time ? new Date(h._time).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""}
                     </div>
