@@ -98,10 +98,10 @@ export default function CreateInventory({ onBack }) {
     setLoading(true);
     try {
       const bins = await suiteql(`
-        SELECT DISTINCT ib.binnumber AS bin_id, BUILTIN.DF(ib.binnumber) AS bin_number
-        FROM inventorybalance ib
-        WHERE BUILTIN.DF(ib.binnumber) = '${trimmed.replace(/'/g, "''")}'
-          AND ib.location = ${selectedLocation.id}
+        SELECT id AS bin_id, binnumber AS bin_number
+        FROM Bin
+        WHERE binnumber = '${trimmed.replace(/'/g, "''")}'
+          AND location = ${selectedLocation.id}
       `);
       if (bins.length === 0) {
         beepWarn(); setFlash("warn"); setTimeout(() => setFlash(null), 400);

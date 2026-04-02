@@ -140,7 +140,7 @@ export default function BinTransfer({ onBack }) {
 
       if (contents.length === 0) {
         beepWarn(); setFlash("warn"); setTimeout(() => setFlash(null), 400);
-        setError("Bin not found or empty at this location");
+        setError("Bin is empty or not found at this location");
         setLoading(false);
         return;
       }
@@ -251,12 +251,12 @@ export default function BinTransfer({ onBack }) {
         return;
       }
 
-      // Validate bin exists at this location via inventorybalance (includes bins with any history)
+      // Validate bin exists at this location via Bin table (works for empty bins too)
       const bins = await suiteql(`
-        SELECT DISTINCT ib.binnumber AS bin_id, BUILTIN.DF(ib.binnumber) AS bin_number
-        FROM inventorybalance ib
-        WHERE BUILTIN.DF(ib.binnumber) = '${trimmed.replace(/'/g, "''")}'
-          AND ib.location = ${selectedLocation.id}
+        SELECT id AS bin_id, binnumber AS bin_number
+        FROM Bin
+        WHERE binnumber = '${trimmed.replace(/'/g, "''")}'
+          AND location = ${selectedLocation.id}
       `);
       if (bins.length === 0) {
         beepWarn(); setFlash("warn"); setTimeout(() => setFlash(null), 400);
