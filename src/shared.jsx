@@ -46,9 +46,9 @@ export const nsRecord = async (method, path, body = null) => {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ method, path, body }),
   });
-  const data = await resp.json();
+  const text = await resp.text();
+  const data = text ? JSON.parse(text) : {};
   if (!resp.ok) {
-    // Extract NS error detail from proxy response shape: { status, data: { "o:errorDetails": [{ detail }] } }
     const nsDetail = data?.data?.["o:errorDetails"]?.[0]?.detail;
     throw new Error(nsDetail || data.error || `API error ${resp.status}`);
   }
