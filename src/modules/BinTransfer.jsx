@@ -290,13 +290,13 @@ export default function BinTransfer({ onBack }) {
       // Create bin transfer record
       const inventoryLines = movingItemsList.map(item => ({
         item: { id: String(item.item_id) },
-        quantity: item.move_qty,
+        quantity: Number(item.move_qty),
         inventoryDetail: {
           inventoryAssignment: {
             items: [{
               binNumber: { id: String(sourceBin.bin_id) },
               toBinNumber: { id: String(destBin.bin_id) },
-              quantity: item.move_qty,
+              quantity: Number(item.move_qty),
             }],
           },
         },
@@ -305,7 +305,7 @@ export default function BinTransfer({ onBack }) {
       await nsRecord("POST", "bintransfer", {
         subsidiary: { id: "2" },
         location: { id: String(selectedLocation.id) },
-        memo: `Bin Transfer: ${sourceBin.bin_number} → ${destBin.bin_number} (${movingItemsList.length} items)`,
+        memo: `Bin Transfer: ${sourceBin.bin_number} to ${destBin.bin_number} (${movingItemsList.length} items)`,
         inventory: { items: inventoryLines },
       });
 
@@ -322,8 +322,9 @@ export default function BinTransfer({ onBack }) {
         });
       } catch (_) { }
     } catch (e) {
-      setError(`Transfer failed: ${e.message}`);
-      setSubmitResult({ success: false, error: e.message });
+      const msg = e.message || "Unknown error";
+      setError(`Transfer failed: ${msg}`);
+      setSubmitResult({ success: false, error: msg });
       try {
         logActivity({
           module: "bin-transfer",
