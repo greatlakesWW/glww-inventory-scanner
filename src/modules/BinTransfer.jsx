@@ -287,42 +287,26 @@ export default function BinTransfer({ onBack }) {
     setSubmitting(true);
     setError(null);
     try {
-      // Use inventoryAdjustment with two lines per item: -qty from source, +qty to dest
-      // Net change is zero — effectively a bin transfer
-      const adjustmentItems = [];
-      movingItemsList.forEach((item, idx) => {
-        // Line 1: remove from source bin
-        adjustmentItems.push({
-          item: { id: String(item.item_id) },
-          adjustQtyBy: -item.move_qty,
-          location: { id: String(selectedLocation.id) },
-          line: (idx * 2) + 1,
-          inventoryDetail: {
-            inventoryAssignment: {
-              items: [{ binNumber: { id: String(sourceBin.bin_id) }, quantity: -item.move_qty }],
-            },
+      // Create bin transfer record
+      const inventoryLines = movingItemsList.map(item => ({
+        item: { id: String(item.item_id) },
+        quantity: item.move_qty,
+        inventoryDetail: {
+          inventoryAssignment: {
+            items: [{
+              binNumber: { id: String(sourceBin.bin_id) },
+              toBinNumber: { id: String(destBin.bin_id) },
+              quantity: item.move_qty,
+            }],
           },
-        });
-        // Line 2: add to destination bin
-        adjustmentItems.push({
-          item: { id: String(item.item_id) },
-          adjustQtyBy: item.move_qty,
-          location: { id: String(selectedLocation.id) },
-          line: (idx * 2) + 2,
-          inventoryDetail: {
-            inventoryAssignment: {
-              items: [{ binNumber: { id: String(destBin.bin_id) }, quantity: item.move_qty }],
-            },
-          },
-        });
-      });
+        },
+      }));
 
-      await nsRecord("POST", "inventoryadjustment", {
+      await nsRecord("POST", "bintransfer", {
         subsidiary: { id: "2" },
-        account: { id: "452" },
-        adjLocation: { id: String(selectedLocation.id) },
+        location: { id: String(selectedLocation.id) },
         memo: `Bin Transfer: ${sourceBin.bin_number} → ${destBin.bin_number} (${movingItemsList.length} items)`,
-        inventory: { items: adjustmentItems },
+        inventory: { items: inventoryLines },
       });
 
       clearSession(SESSION_KEY);
