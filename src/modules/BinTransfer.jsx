@@ -119,22 +119,7 @@ export default function BinTransfer({ onBack }) {
     setError(null);
     setLoading(true);
     try {
-      // Validate bin at this location
-      const bins = await suiteql(`
-        SELECT bin.id AS bin_id, BUILTIN.DF(bin.binnumber) AS bin_number
-        FROM Bin bin
-        WHERE BUILTIN.DF(bin.binnumber) = '${trimmed.replace(/'/g, "''")}'
-          AND bin.location = ${selectedLocation.id}
-      `);
-      if (bins.length === 0) {
-        beepWarn(); setFlash("warn"); setTimeout(() => setFlash(null), 400);
-        setError(`Bin not found at ${selectedLocation.name}`);
-        setLoading(false);
-        return;
-      }
-      const bin = bins[0];
-
-      // Load bin contents
+      // Load bin contents (also validates the bin exists at this location)
       const contents = await suiteql(`
         SELECT
           ib.item AS item_id,
@@ -147,7 +132,7 @@ export default function BinTransfer({ onBack }) {
           BUILTIN.DF(ib.binnumber) AS bin_number
         FROM inventorybalance ib
         JOIN item ON ib.item = item.id
-        WHERE ib.binnumber = ${bin.bin_id}
+        WHERE BUILTIN.DF(ib.binnumber) = '${trimmed.replace(/'/g, "''")}'
           AND ib.location = ${selectedLocation.id}
           AND ib.quantityonhand > 0
         ORDER BY item.itemid
@@ -155,11 +140,12 @@ export default function BinTransfer({ onBack }) {
 
       if (contents.length === 0) {
         beepWarn(); setFlash("warn"); setTimeout(() => setFlash(null), 400);
-        setError("This bin is empty");
+        setError("Bin not found or empty at this location");
         setLoading(false);
         return;
       }
 
+      const bin = { bin_id: contents[0].bin_id, bin_number: contents[0].bin_number };
       setSourceBin(bin);
       setBinContents(contents);
       setMoveItems({});
@@ -265,12 +251,12 @@ export default function BinTransfer({ onBack }) {
         return;
       }
 
-      // Validate bin at this location
+      // Validate bin exists at this location via inventorybalance (includes bins with any history)
       const bins = await suiteql(`
-        SELECT bin.id AS bin_id, BUILTIN.DF(bin.binnumber) AS bin_number
-        FROM Bin bin
-        WHERE BUILTIN.DF(bin.binnumber) = '${trimmed.replace(/'/g, "''")}'
-          AND bin.location = ${selectedLocation.id}
+        SELECT DISTINCT ib.binnumber AS bin_id, BUILTIN.DF(ib.binnumber) AS bin_number
+        FROM inventorybalance ib
+        WHERE BUILTIN.DF(ib.binnumber) = '${trimmed.replace(/'/g, "''")}'
+          AND ib.location = ${selectedLocation.id}
       `);
       if (bins.length === 0) {
         beepWarn(); setFlash("warn"); setTimeout(() => setFlash(null), 400);
