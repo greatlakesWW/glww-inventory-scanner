@@ -56,6 +56,8 @@ export default function InventoryCount({ onBack }) {
   const [scans, setScans] = useState(saved?.scans || {});
   const [scanLog, setScanLog] = useState(() => saved?.scanLog ? saved.scanLog.map(s => ({ ...s, time: new Date(s.time) })) : []);
   const [flash, setFlash] = useState(null);
+  const [noUpcEditId, setNoUpcEditId] = useState(null);
+  const [noUpcEditQty, setNoUpcEditQty] = useState("");
   const [filter, setFilter] = useState("");
   const [emailTo, setEmailTo] = useState(saved?.emailTo || "");
 
@@ -938,21 +940,71 @@ export default function InventoryCount({ onBack }) {
             {binExpected.length > 0 && (
               <div style={{ ...S.card, padding: 0 }}>
                 <div style={{ padding: "10px 14px", borderBottom: "1px solid rgba(255,255,255,0.06)", fontSize: 11, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: 0.5 }}>Expected in {currentBin} ({binExpected.length} items)</div>
-                <div style={{ maxHeight: 240, overflowY: "auto" }}>
+                <div style={{ maxHeight: 280, overflowY: "auto" }}>
                   {binExpected.map((item, i) => {
                     const sq = binScans[item.upc] || binScans[`SKU:${item.sku}`] || 0;
                     const eq = Number(item.expected_qty) || 0;
                     const done = sq >= eq;
+                    const hasUpc = !!item.upc;
+                    const isEditing = noUpcEditId === item.internalid;
+
+                    const handleRowClick = (e) => {
+                      e.stopPropagation();
+                      if (!hasUpc) {
+                        setNoUpcEditId(item.internalid);
+                        setNoUpcEditQty(String(sq || ""));
+                      } else {
+                        openDrawer(item.internalid);
+                      }
+                    };
+
+                    const confirmNoUpcQty = () => {
+                      const qty = Math.max(0, parseInt(noUpcEditQty) || 0);
+                      const key = currentBin ? `${currentBin}::SKU:${item.sku}` : `SKU:${item.sku}`;
+                      setScans(p => {
+                        const next = { ...p };
+                        if (qty <= 0) delete next[key];
+                        else next[key] = qty;
+                        return next;
+                      });
+                      if (qty > 0) {
+                        setScanLog(p => [{ upc: `SKU:${item.sku}`, bin: currentBin, time: new Date(), itemname: item.itemname, sku: item.sku }, ...p]);
+                        beepOk(); setFlash("ok"); setTimeout(() => setFlash(null), 400);
+                      }
+                      setNoUpcEditId(null); setNoUpcEditQty("");
+                      setTimeout(() => scanRef.current?.focus(), 100);
+                    };
+
                     return (
-                      <div key={i} onClick={(e) => { e.stopPropagation(); openDrawer(item.internalid); }} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", borderBottom: "1px solid rgba(255,255,255,0.03)", background: done ? "rgba(34,197,94,0.04)" : "transparent", opacity: done ? 0.6 : 1, cursor: "pointer", touchAction: "manipulation" }}>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: 13, fontWeight: 600, ...mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textDecoration: done ? "line-through" : "none", color: done ? "#22c55e" : "#e2e8f0" }}>{item.sku}</div>
-                          <div style={{ fontSize: 11, color: "#64748b" }}>{item.upc || "No UPC"}</div>
+                      <div key={i} style={{ borderBottom: "1px solid rgba(255,255,255,0.03)", background: done ? "rgba(34,197,94,0.04)" : !hasUpc && !isEditing ? "rgba(245,158,11,0.03)" : "transparent", opacity: done && !isEditing ? 0.6 : 1 }}>
+                        <div onClick={handleRowClick} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", cursor: "pointer", touchAction: "manipulation" }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, ...mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textDecoration: done ? "line-through" : "none", color: done ? "#22c55e" : "#e2e8f0" }}>{item.sku}</div>
+                            {hasUpc
+                              ? <div style={{ fontSize: 11, color: "#64748b" }}>{item.upc}</div>
+                              : <div style={{ fontSize: 11, color: "#f59e0b", fontWeight: 600 }}>✎ Tap to count</div>
+                            }
+                          </div>
+                          <div style={{ textAlign: "right", marginLeft: 12 }}>
+                            <span style={{ ...mono, fontSize: 16, fontWeight: 700, color: done ? "#22c55e" : sq > 0 ? "#f59e0b" : "#475569" }}>{sq}</span>
+                            <span style={{ fontSize: 12, color: "#64748b" }}> / {eq}</span>
+                          </div>
                         </div>
-                        <div style={{ textAlign: "right", marginLeft: 12 }}>
-                          <span style={{ ...mono, fontSize: 16, fontWeight: 700, color: done ? "#22c55e" : sq > 0 ? "#f59e0b" : "#475569" }}>{sq}</span>
-                          <span style={{ fontSize: 12, color: "#64748b" }}> / {eq}</span>
-                        </div>
+                        {isEditing && (
+                          <div onClick={e => e.stopPropagation()} style={{ padding: "6px 14px 12px", display: "flex", alignItems: "center", gap: 4 }}>
+                            <button onClick={() => setNoUpcEditQty(String(Math.max(0, (parseInt(noUpcEditQty) || 0) - 1)))} style={{ ...S.btnSm, width: 36, minHeight: 36, padding: 0, textAlign: "center", fontSize: 18 }}>−</button>
+                            <input
+                              type="number" value={noUpcEditQty} autoFocus
+                              onChange={e => setNoUpcEditQty(e.target.value)}
+                              onKeyDown={e => { if (e.key === "Enter") confirmNoUpcQty(); if (e.key === "Escape") { setNoUpcEditId(null); setNoUpcEditQty(""); } }}
+                              onClick={e => e.stopPropagation()}
+                              style={{ ...S.inp, width: 64, minHeight: 36, padding: "6px 8px", textAlign: "center", fontSize: 16, ...mono }}
+                            />
+                            <button onClick={() => setNoUpcEditQty(String((parseInt(noUpcEditQty) || 0) + 1))} style={{ ...S.btnSm, width: 36, minHeight: 36, padding: 0, textAlign: "center", fontSize: 18 }}>+</button>
+                            <button onClick={confirmNoUpcQty} style={{ ...S.btnSm, background: "#22c55e", color: "#fff", border: "none", padding: "6px 12px", fontWeight: 700 }}>OK</button>
+                            <button onClick={() => { setNoUpcEditId(null); setNoUpcEditQty(""); }} style={{ ...S.btnSm, padding: "6px 10px" }}>✕</button>
+                          </div>
+                        )}
                       </div>
                     );
                   })}
