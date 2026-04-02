@@ -287,27 +287,20 @@ export default function BinTransfer({ onBack }) {
     setSubmitting(true);
     setError(null);
     try {
-      // Build bin transfer record — uses bintransfer with inventoryDetail
-      const inventoryLines = movingItemsList.map(item => ({
-        item: { id: String(item.item_id) },
-        quantity: item.move_qty,
-        inventoryDetail: {
-          inventoryAssignment: {
+      // Use inventoryTransfer (proven pattern from ItemReceipts) — one per item line
+      for (const item of movingItemsList) {
+        await nsRecord("POST", "inventoryTransfer", {
+          location: { id: String(selectedLocation.id) },
+          inventory: {
             items: [{
-              binNumber: { id: String(sourceBin.bin_id) },
-              toBinNumber: { id: String(destBin.bin_id) },
-              quantity: item.move_qty,
+              item: { id: String(item.item_id) },
+              adjustQtyBy: item.move_qty,
+              fromBin: sourceBin.bin_number,
+              toBin: destBin.bin_number,
             }],
           },
-        },
-      }));
-
-      await nsRecord("POST", "bintransfer", {
-        subsidiary: { id: "1" },
-        location: { id: String(selectedLocation.id) },
-        memo: `Bin Transfer: ${sourceBin.bin_number} → ${destBin.bin_number} (${movingItemsList.length} items)`,
-        inventory: { items: inventoryLines },
-      });
+        });
+      }
 
       clearSession(SESSION_KEY);
       setSubmitResult({ success: true });
