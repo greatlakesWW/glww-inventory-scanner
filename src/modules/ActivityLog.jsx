@@ -12,6 +12,7 @@ const MODULE_OPTIONS = [
   { value: "item-receipts", label: "Item Receipts" },
   { value: "inventory-count", label: "Inventory Count" },
   { value: "bin-transfer", label: "Bin Transfer" },
+  { value: "create-inventory", label: "Create Inventory" },
   { value: "item-lookup", label: "Item Lookup" },
 ];
 
@@ -49,6 +50,11 @@ const ACTION_OPTIONS = {
     { value: "bin-transfer-completed", label: "Transfer Completed" },
     { value: "bin-transfer-failed", label: "Transfer Failed" },
   ],
+  "create-inventory": [
+    { value: "", label: "All Actions" }, { value: "errors-only", label: "Errors Only" },
+    { value: "inventory-created", label: "Inventory Created" },
+    { value: "inventory-create-failed", label: "Create Failed" },
+  ],
   "item-lookup": [
     { value: "", label: "All Actions" },
     { value: "item-lookup", label: "Item Lookup" },
@@ -71,6 +77,8 @@ const ACTION_LABELS = {
   "bin-transfer-failed": "Bin Transfer Failed",
   "count-exported": "Count Exported",
   "count-adjustment-exported": "Adjustment Exported",
+  "inventory-created": "Inventory Created",
+  "inventory-create-failed": "Inventory Create Failed",
   "item-lookup": "Item Lookup",
 };
 

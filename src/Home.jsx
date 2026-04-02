@@ -7,6 +7,7 @@ const modules = [
   { id: "transfer-orders", name: "Transfer Orders", subtitle: "Move between locations", accent: "#7c3aed", icon: "⇄" },
   { id: "bin-transfer", name: "Bin Transfer", subtitle: "Move items between bins", accent: "#14b8a6", icon: "⇋" },
   { id: "item-receipts", name: "Item Receipts", subtitle: "Receive purchase orders", accent: "#f59e0b", icon: "↓" },
+  { id: "create-inventory", name: "Create Inventory", subtitle: "Add items to bins", accent: "#10b981", icon: "＋" },
 ];
 
 const ConnDot = ({ status }) => {
