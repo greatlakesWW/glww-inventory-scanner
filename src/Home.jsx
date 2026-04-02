@@ -5,6 +5,7 @@ const modules = [
   { id: "inventory-count", name: "Inventory Count", subtitle: "Count & adjust inventory", accent: "#3b82f6", icon: "▦" },
   { id: "smart-fulfillment", name: "Smart Fulfillment", subtitle: "Wave pick Shopify orders", accent: "#22c55e", icon: "⇢" },
   { id: "transfer-orders", name: "Transfer Orders", subtitle: "Move between locations", accent: "#7c3aed", icon: "⇄" },
+  { id: "bin-transfer", name: "Bin Transfer", subtitle: "Move items between bins", accent: "#14b8a6", icon: "⇋" },
   { id: "item-receipts", name: "Item Receipts", subtitle: "Receive purchase orders", accent: "#f59e0b", icon: "↓" },
 ];
 

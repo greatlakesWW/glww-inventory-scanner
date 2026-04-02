@@ -11,6 +11,7 @@ const MODULE_OPTIONS = [
   { value: "transfer-orders", label: "Transfer Orders" },
   { value: "item-receipts", label: "Item Receipts" },
   { value: "inventory-count", label: "Inventory Count" },
+  { value: "bin-transfer", label: "Bin Transfer" },
   { value: "item-lookup", label: "Item Lookup" },
 ];
 
@@ -42,6 +43,11 @@ const ACTION_OPTIONS = {
     { value: "", label: "All Actions" }, { value: "errors-only", label: "Errors Only" },
     { value: "count-exported", label: "Count Exported" },
     { value: "count-adjustment-exported", label: "Adjustment Exported" },
+  ],
+  "bin-transfer": [
+    { value: "", label: "All Actions" }, { value: "errors-only", label: "Errors Only" },
+    { value: "bin-transfer-completed", label: "Transfer Completed" },
+    { value: "bin-transfer-failed", label: "Transfer Failed" },
   ],
   "item-lookup": [
     { value: "", label: "All Actions" },
