@@ -305,7 +305,7 @@ export default function BinTransfer({ onBack }) {
       await nsRecord("POST", "bintransfer", {
         subsidiary: { id: "2" },
         location: { id: String(selectedLocation.id) },
-        memo: `Bin Transfer: ${sourceBin.bin_number} to ${destBin.bin_number} (${movingItemsList.length} items)`,
+        memo: `${sourceBin.bin_number} to ${destBin.bin_number}`.slice(0, 40),
         inventory: { items: inventoryLines },
       });
 
