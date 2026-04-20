@@ -127,6 +127,31 @@ curl -sX PATCH $BASE/api/pick-sessions/$SESSION_ID \
 curl -s $BASE/api/pick-sessions/$SESSION_ID
 ```
 
+### Windows / PowerShell gotcha
+
+On Windows, PowerShell passes args through Windows' `CommandLineToArgvW` before reaching `curl.exe`, which consumes unescaped `"` as argument delimiters. So `-d '{"toId":"99999"}'` reaches curl as `{toId:99999}` — invalid JSON, and Vercel's body parser returns 400 with an empty body before your handler runs.
+
+Escape inner quotes with backslashes to preserve them through the Windows arg parser:
+
+```powershell
+$BASE = "https://your-deploy.vercel.app"
+
+# 1. Create — note the \" inside the JSON string
+$r1 = curl.exe -sX POST "$BASE/api/pick-sessions" -H "Content-Type: application/json" `
+  -d '{\"toId\":\"99999\",\"pickerName\":\"Alice\"}'
+$SID = ($r1 | ConvertFrom-Json).sessionId
+
+# 4. Append scan
+curl.exe -sX PATCH "$BASE/api/pick-sessions/$SID" -H "Content-Type: application/json" `
+  -d '{\"type\":\"scan\",\"pickerName\":\"Alice\",\"lineId\":\"1\",\"itemId\":\"9876\",\"binId\":\"1001\",\"qty\":1,\"clientEventId\":\"evt_c1\",\"deviceId\":\"dev_001\"}'
+
+# 6. Take over
+curl.exe -sX PATCH "$BASE/api/pick-sessions/$SID" -H "Content-Type: application/json" `
+  -d '{\"type\":\"take_over\",\"newPickerName\":\"Bob\",\"clientEventId\":\"evt_takeover_1\",\"deviceId\":\"dev_002\"}'
+```
+
+Symptom when you forget to escape: HTTP 400 with `Content-Length: 0` and no `Content-Type` response header. That's Vercel's body parser rejecting malformed JSON before the handler runs.
+
 ### Covers acceptance criteria (§7 "Pick Screen — session creation")
 - [x] New session creates KV entry with correct shape — step 1
 - [x] Existing session for same picker → resumes — step 2
