@@ -19,7 +19,7 @@ export default async function handler(req, res) {
 
   const rawId = req.query?.id;
   if (!rawId || typeof rawId !== "string") {
-    return res.status(400).json({ error: "Missing sessionId path param" });
+    return res.status(400).json({ error: "Missing ':id' path parameter" });
   }
 
   const toId = Number(rawId);
@@ -28,8 +28,11 @@ export default async function handler(req, res) {
   }
 
   try {
-    // ─── Step 1: header + eligible lines in a single query ───
-    const linesQuery = `
+    // ─── Query 1: TO header ───
+    // Starts FROM transaction only — no transactionline join — to avoid
+    // the NetSuite SEARCH-channel NOT_EXPOSED rules that reject a join
+    // of `transaction` to `transactionline` even when filtered to one TO.
+    const headerQuery = `
       SELECT
         t.id AS internalid,
         t.tranid AS tran_id,
@@ -37,6 +40,27 @@ export default async function handler(req, res) {
         BUILTIN.DF(t.location) AS source_location_name,
         t.transferlocation AS destination_location_id,
         BUILTIN.DF(t.transferlocation) AS destination_location_name,
+        BUILTIN.DF(t.status) AS status_name
+      FROM transaction t
+      WHERE t.id = ${toId}
+        AND t.type = 'TrnfrOrd'
+    `;
+
+    const { items: headerRows } = await runSuiteQL(headerQuery);
+    if (headerRows.length === 0) {
+      return res.status(404).json({ error: "Transfer order not found" });
+    }
+    const header = headerRows[0];
+    const sourceLocationId = Number(header.source_location_id);
+
+    // ─── Query 2: TO lines ───
+    // Mirrors the production pattern in src/modules/TransferOrders.jsx:
+    //   FROM transactionline tl JOIN item ON tl.item = item.id
+    //   WHERE tl.transaction = {id} AND tl.mainline = 'F' ...
+    // This scope (FROM transactionline, WHERE tl.transaction = single id)
+    // is the narrow form NetSuite exposes `quantityfulfilled` through.
+    const linesQuery = `
+      SELECT
         tl.id AS line_id,
         tl.linesequencenumber AS line_number,
         tl.item AS item_id,
@@ -46,28 +70,36 @@ export default async function handler(req, res) {
         tl.quantity AS ordered_qty,
         tl.quantityfulfilled AS fulfilled_qty,
         (tl.quantity - COALESCE(tl.quantityfulfilled, 0)) AS remaining_qty
-      FROM transaction t
-      JOIN transactionline tl ON tl.transaction = t.id
+      FROM transactionline tl
       JOIN item ON tl.item = item.id
-      WHERE t.id = ${toId}
-        AND t.type = 'TrnfrOrd'
+      WHERE tl.transaction = ${toId}
         AND tl.mainline = 'F'
         AND tl.itemtype IN ('InvtPart', 'Assembly', 'Kit')
       ORDER BY tl.linesequencenumber
     `;
 
-    const { items: rows } = await runSuiteQL(linesQuery);
-    if (rows.length === 0) {
-      return res.status(404).json({ error: "Transfer order not found" });
+    const { items: lineRows } = await runSuiteQL(linesQuery);
+    if (lineRows.length === 0) {
+      // TO exists but has no eligible lines (fully fulfilled, or only shipping/tax lines).
+      // Return an empty lines array rather than 404 — the UI can render "Nothing to pick".
+      return res.status(200).json({
+        id: String(header.internalid),
+        tranId: header.tran_id,
+        sourceLocationId: String(header.source_location_id),
+        sourceLocationName: header.source_location_name,
+        destinationLocationId: header.destination_location_id != null ? String(header.destination_location_id) : null,
+        destinationLocationName: header.destination_location_name || null,
+        lines: [],
+      });
     }
 
-    // Header comes from the first row (all rows share the same transaction).
-    const header = rows[0];
-    const sourceLocationId = Number(header.source_location_id);
-
-    // ─── Step 2: per-bin availability for all line items at the source ───
+    // ─── Query 3: per-bin availability for all line items at the source ───
     // Batch the IN (...) clause to stay under NetSuite's expression limits.
-    const itemIds = [...new Set(rows.map((r) => Number(r.item_id)).filter((n) => Number.isInteger(n) && n > 0))];
+    // inventorybalance.item is searchable, so IN works here (unlike
+    // transactionline.quantityfulfilled).
+    const itemIds = [
+      ...new Set(lineRows.map((r) => Number(r.item_id)).filter((n) => Number.isInteger(n) && n > 0)),
+    ];
 
     const binRows = [];
     if (itemIds.length > 0 && Number.isInteger(sourceLocationId) && sourceLocationId > 0) {
@@ -109,7 +141,7 @@ export default async function handler(req, res) {
       sourceLocationName: header.source_location_name,
       destinationLocationId: header.destination_location_id != null ? String(header.destination_location_id) : null,
       destinationLocationName: header.destination_location_name || null,
-      lines: rows.map((r) => ({
+      lines: lineRows.map((r) => ({
         lineId: String(r.line_id),
         lineNumber: Number(r.line_number) || null,
         itemId: String(r.item_id),
