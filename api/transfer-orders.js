@@ -1,5 +1,5 @@
 import { kv } from "@vercel/kv";
-import { runSuiteQL } from "./_suiteql.js";
+import { runSuiteQL, batchIds } from "./_suiteql.js";
 import { KEY_SESSION_BY_TO } from "./_kv.js";
 
 // ═══════════════════════════════════════════════════════════
@@ -33,11 +33,14 @@ export default async function handler(req, res) {
   }
 
   try {
-    // ─── SuiteQL ───
-    // Single query: join transaction + transactionline, aggregate line count
-    // and remaining qty per TO. Filter to open outbound TOs only
-    // (TrnfrOrd:B = Pending Fulfillment, TrnfrOrd:D = Partially Fulfilled).
-    const query = `
+    // ─── Query 1: TO headers only ───
+    // Filtering on transactionline fields like `quantityfulfilled` across
+    // arbitrary transactions is blocked by NetSuite's SEARCH-channel field
+    // exposure rules (NOT_EXPOSED). Detail queries with a specific
+    // transaction ID work; broad aggregate scans do not. So we pull headers
+    // first, then aggregate line counts in a second query scoped to the
+    // returned transaction IDs.
+    const headerQuery = `
       SELECT
         t.id AS internalid,
         t.tranid AS tran_id,
@@ -47,34 +50,65 @@ export default async function handler(req, res) {
         t.transferlocation AS destination_location_id,
         BUILTIN.DF(t.transferlocation) AS destination_location_name,
         BUILTIN.DF(t.status) AS status_name,
-        t.status AS status_code,
-        COUNT(tl.id) AS line_count,
-        SUM(tl.quantity - COALESCE(tl.quantityfulfilled, 0)) AS total_remaining_qty
+        t.status AS status_code
       FROM transaction t
-      JOIN transactionline tl ON tl.transaction = t.id
       WHERE t.type = 'TrnfrOrd'
         AND t.location = ${locationId}
         AND t.status IN ('TrnfrOrd:B', 'TrnfrOrd:D')
-        AND tl.mainline = 'F'
-        AND tl.itemtype IN ('InvtPart', 'Assembly', 'Kit')
-        AND (tl.quantity - COALESCE(tl.quantityfulfilled, 0)) > 0
-      GROUP BY t.id, t.tranid, t.trandate, t.location, BUILTIN.DF(t.location),
-        t.transferlocation, BUILTIN.DF(t.transferlocation), BUILTIN.DF(t.status), t.status
       ORDER BY t.trandate DESC
     `;
 
-    const { items } = await runSuiteQL(query);
+    const { items: headers } = await runSuiteQL(headerQuery);
+
+    // ─── Query 2: aggregate line counts, scoped by transaction ID ───
+    // Mirror the working production pattern (TransferOrders.jsx uses
+    // `WHERE tl.transaction = {single_id}` successfully). The IN clause
+    // scopes this to specific TOs rather than an open-ended scan.
+    // Wrapped in try/catch: if aggregation still trips exposure rules,
+    // degrade gracefully to null counts rather than failing the list.
+    const aggsByTo = {};
+    if (headers.length > 0) {
+      const toIds = headers
+        .map((h) => Number(h.internalid))
+        .filter((n) => Number.isInteger(n) && n > 0);
+      try {
+        for (const batch of batchIds(toIds, 200)) {
+          const aggQuery = `
+            SELECT
+              tl.transaction AS to_id,
+              COUNT(tl.id) AS line_count,
+              SUM(tl.quantity - COALESCE(tl.quantityfulfilled, 0)) AS total_remaining_qty
+            FROM transactionline tl
+            WHERE tl.transaction IN (${batch.join(",")})
+              AND tl.mainline = 'F'
+              AND tl.itemtype IN ('InvtPart', 'Assembly', 'Kit')
+              AND (tl.quantity - COALESCE(tl.quantityfulfilled, 0)) > 0
+            GROUP BY tl.transaction
+          `;
+          const { items } = await runSuiteQL(aggQuery);
+          for (const row of items) {
+            aggsByTo[String(row.to_id)] = {
+              lineCount: Number(row.line_count) || 0,
+              totalQty: Number(row.total_remaining_qty) || 0,
+            };
+          }
+        }
+      } catch (aggErr) {
+        console.warn("transfer-orders: line aggregation failed, returning null counts:", aggErr.message);
+      }
+    }
 
     // ─── Lock-state merge (KV) ───
-    // For each TO, look up session:to:{toId} in KV. Cheaper than SCAN for small
-    // result sets and exact-match semantics.
+    // For each TO, look up session:to:{toId} in KV. Cheaper than SCAN for
+    // small result sets and exact-match semantics.
     const sessions = await Promise.all(
-      items.map((row) => kv.get(KEY_SESSION_BY_TO(String(row.internalid))))
+      headers.map((row) => kv.get(KEY_SESSION_BY_TO(String(row.internalid))))
     );
 
     // ─── Shape response per §4.1 ───
-    const orders = items.map((row, i) => {
+    const orders = headers.map((row, i) => {
       const sess = sessions[i];
+      const agg = aggsByTo[String(row.internalid)];
       return {
         id: String(row.internalid),
         tranId: row.tran_id,
@@ -84,8 +118,8 @@ export default async function handler(req, res) {
         destinationLocationId: row.destination_location_id != null ? String(row.destination_location_id) : null,
         destinationLocationName: row.destination_location_name || null,
         status: row.status_name,
-        lineCount: Number(row.line_count) || 0,
-        totalQty: Number(row.total_remaining_qty) || 0,
+        lineCount: agg ? agg.lineCount : null,
+        totalQty: agg ? agg.totalQty : null,
         lockedBy: sess?.pickerName || null,
         lockedAt: sess?.updatedAt || null,
       };
