@@ -166,9 +166,16 @@ export default async function handler(req, res) {
       };
     });
 
+    // Extract status — REST Record returns either a string or { id, refName } object.
+    const rawStatus = to.status;
+    const statusId = typeof rawStatus === "string" ? rawStatus : rawStatus?.id || null;
+    const statusName = typeof rawStatus === "string" ? rawStatus : rawStatus?.refName || null;
+
     const response = {
       id: String(to.id),
       tranId: to.tranId || null,
+      statusId,
+      status: statusName,
       sourceLocationId: sourceLocation.id != null ? String(sourceLocation.id) : null,
       sourceLocationName: sourceLocation.refName || null,
       destinationLocationId: destinationLocation.id != null ? String(destinationLocation.id) : null,
