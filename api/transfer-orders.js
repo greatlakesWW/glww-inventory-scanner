@@ -65,13 +65,22 @@ export default async function handler(req, res) {
     const config = getSuiteQLConfig();
 
     // ─── Step 1: SuiteQL list of TO IDs at this location ───
-    // Safe query — only touches transaction header fields, no NOT_EXPOSED
-    // transactionline fields.
+    // Safe query — only touches transaction header fields. No NOT_EXPOSED
+    // transactionline fields referenced.
+    //
+    // Filter matches either `t.location` OR `t.transferlocation` against
+    // the given id. NetSuite's SuiteQL has shown inconsistency in which
+    // field stores source vs destination for transfer orders — evidence
+    // from diagnostic runs: TO 523165's REST-side `location.id = 5`
+    // (source, Backroom) did NOT match `WHERE t.location = 5` in SuiteQL.
+    // Matching either side and then filtering in JS by REST-side
+    // source-location equality gives a reliable source-location filter
+    // regardless of which SuiteQL field NS has populated.
     const idQuery = `
       SELECT t.id AS internalid
       FROM transaction t
       WHERE t.type = 'TrnfrOrd'
-        AND t.location = ${locationId}
+        AND (t.location = ${locationId} OR t.transferlocation = ${locationId})
     `;
     const { items: idRows } = await runSuiteQL(idQuery);
     const toIds = idRows.map((r) => Number(r.internalid)).filter((n) => Number.isInteger(n) && n > 0);
@@ -104,8 +113,16 @@ export default async function handler(req, res) {
 
     const allTos = (await Promise.all(detailPromises)).filter((x) => x && x.id);
 
-    // ─── Step 3: filter to open statuses in JS ───
-    const tos = allTos.filter((to) => isOpenStatus(to.status));
+    // ─── Step 3: filter to open statuses AND source-location match in JS ───
+    // REST-side `location.id` is the source location (detail endpoint
+    // proved this: TO 523165 has REST location.id = 5 = Backroom source).
+    // Use that as the source-of-truth for source filtering, regardless of
+    // which SuiteQL field matched.
+    const tos = allTos.filter((to) => {
+      if (!isOpenStatus(to.status)) return false;
+      const src = to.location?.id != null ? Number(to.location.id) : null;
+      return src === locationId;
+    });
 
     // ─── Step 4: lock-state merge via KV ───
     const sessions = await Promise.all(
