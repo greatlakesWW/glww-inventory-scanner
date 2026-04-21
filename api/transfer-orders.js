@@ -1,31 +1,35 @@
 import { kv } from "@vercel/kv";
-import { runSuiteQL, getSuiteQLConfig } from "./_suiteql.js";
+import { getSuiteQLConfig } from "./_suiteql.js";
 import { generateOAuthHeader } from "./_auth.js";
 import { KEY_SESSION_BY_TO } from "./_kv.js";
 
 // ═══════════════════════════════════════════════════════════
 // GET /api/transfer-orders?location={id}
 //
-// HYBRID flow:
-//   1. SuiteQL gets the list of TO internal IDs at the source location
-//      (no NOT_EXPOSED fields — just transaction header, which is safe).
-//   2. REST Record API fetches each TO's header fields (tranId, status,
-//      locations, date) because the REST endpoint has broader field
-//      exposure than SuiteQL's SEARCH channel.
-//   3. Status filter runs in JS over the fetched headers.
-//   4. KV merge adds lock state.
+// All REST Record API — no SuiteQL. Established via diagnostic
+// sessions 2a/2b:
+//   - SuiteQL's t.location and t.transferlocation did not match
+//     TO 523165 (known to have REST location.id = 5) under any
+//     combination tested.
+//   - REST search field vocab for transferOrder is opaque; direct
+//     filters like `location ANY_OF [5]` returned empty.
+//   - Both the REST list (ids only) AND per-id REST header fetches
+//     work reliably.
 //
-// Why hybrid: SuiteQL has working location filtering on transaction; the
-// REST SEARCH language for transferOrder has an opaque `location` /
-// `transferLocation` vocabulary that didn't behave like the record shape.
-// Rather than keep guessing at the right REST search field, use SuiteQL
-// where it works and REST where we need the full field exposure.
+// Flow:
+//   1. REST list /transferOrder (paginated) — gets every TO id.
+//   2. Fetch each TO's header fields in parallel via REST.
+//   3. JS filter: to.location.id matches requested source location
+//      AND status is open.
+//   4. KV merge for lockedBy/lockedAt.
+//
+// At ~132 TOs in this account the parallel header fetches complete
+// in a couple of seconds. If the count grows, we can add a client-
+// side location hint or switch to SuiteAnalytics Connect.
 //
 // Source of truth: docs/FEATURE_SPEC_TO_FULFILLMENT.md §4.1
 // ═══════════════════════════════════════════════════════════
 
-// Statuses we consider "open outbound" — pickable. REST returns status as
-// either enum string, refName display, or {id, refName}. Normalize all.
 const OPEN_STATUS_TOKENS = new Set([
   "pendingfulfillment",
   "partiallyfulfilled",
@@ -40,7 +44,65 @@ function isOpenStatus(raw) {
     if (raw.id) candidates.push(String(raw.id));
     if (raw.refName) candidates.push(String(raw.refName));
   }
-  return candidates.some((c) => OPEN_STATUS_TOKENS.has(c.toLowerCase()));
+  return candidates.some((c) => OPEN_STATUS_TOKENS.has(String(c).toLowerCase()));
+}
+
+// Fetch every transferOrder id, paginating until exhausted. Caps at 2000 for safety.
+async function listAllTransferOrderIds(config) {
+  const baseUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/transferOrder`;
+  const PAGE = 1000;
+  let offset = 0;
+  const ids = [];
+  while (true) {
+    const qp = { limit: String(PAGE), offset: String(offset) };
+    const fullUrl = `${baseUrl}?limit=${PAGE}&offset=${offset}`;
+    const authHeader = generateOAuthHeader("GET", baseUrl, qp, config);
+    const resp = await fetch(fullUrl, { method: "GET", headers: { Authorization: authHeader } });
+    if (!resp.ok) {
+      const text = await resp.text();
+      const err = new Error(`transferOrder list ${resp.status}: ${text.slice(0, 300)}`);
+      err.status = resp.status;
+      err.body = text;
+      throw err;
+    }
+    const data = await resp.json();
+    const items = Array.isArray(data?.items) ? data.items : [];
+    for (const it of items) if (it.id) ids.push(it.id);
+    if (!data?.hasMore || items.length === 0) break;
+    offset += items.length;
+    if (ids.length >= 2000) break; // safety
+  }
+  return ids;
+}
+
+async function fetchHeader(config, id) {
+  const baseUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/transferOrder/${id}`;
+  const fieldList = "id,tranId,tranDate,status,location,transferLocation";
+  const qp = { fields: fieldList };
+  const fullUrl = `${baseUrl}?fields=${encodeURIComponent(fieldList)}`;
+  const authHeader = generateOAuthHeader("GET", baseUrl, qp, config);
+  try {
+    const r = await fetch(fullUrl, { method: "GET", headers: { Authorization: authHeader } });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch {
+    return null;
+  }
+}
+
+// Run N async tasks with a concurrency cap to avoid opening 132+ sockets at once.
+async function mapWithConcurrency(items, concurrency, fn) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (true) {
+      const i = cursor++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 export default async function handler(req, res) {
@@ -64,75 +126,25 @@ export default async function handler(req, res) {
   try {
     const config = getSuiteQLConfig();
 
-    // ─── Step 1: SuiteQL list of TO IDs at this location ───
-    // Safe query — only touches transaction header fields. No NOT_EXPOSED
-    // transactionline fields referenced.
-    //
-    // Filter matches either `t.location` OR `t.transferlocation` against
-    // the given id. NetSuite's SuiteQL has shown inconsistency in which
-    // field stores source vs destination for transfer orders — evidence
-    // from diagnostic runs: TO 523165's REST-side `location.id = 5`
-    // (source, Backroom) did NOT match `WHERE t.location = 5` in SuiteQL.
-    // Matching either side and then filtering in JS by REST-side
-    // source-location equality gives a reliable source-location filter
-    // regardless of which SuiteQL field NS has populated.
-    const idQuery = `
-      SELECT t.id AS internalid
-      FROM transaction t
-      WHERE t.type = 'TrnfrOrd'
-        AND (t.location = ${locationId} OR t.transferlocation = ${locationId})
-    `;
-    const { items: idRows } = await runSuiteQL(idQuery);
-    const toIds = idRows.map((r) => Number(r.internalid)).filter((n) => Number.isInteger(n) && n > 0);
+    // 1. All TO ids
+    const ids = await listAllTransferOrderIds(config);
 
-    if (toIds.length === 0) {
-      return res.status(200).json({ orders: [] });
-    }
+    // 2. Headers in parallel with concurrency cap
+    const headers = (await mapWithConcurrency(ids, 20, (id) => fetchHeader(config, id)))
+      .filter((h) => h && h.id);
 
-    // ─── Step 2: fetch headers via REST Record API in parallel ───
-    const baseUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/transferOrder`;
-    const fieldList = "id,tranId,tranDate,status,location,transferLocation";
-
-    const detailPromises = toIds.map(async (id) => {
-      const recUrl = `${baseUrl}/${id}`;
-      const recQp = { fields: fieldList };
-      const recFullUrl = `${recUrl}?fields=${encodeURIComponent(fieldList)}`;
-      const recAuth = generateOAuthHeader("GET", recUrl, recQp, config);
-      try {
-        const r = await fetch(recFullUrl, { method: "GET", headers: { Authorization: recAuth } });
-        if (!r.ok) {
-          console.warn(`TO header fetch ${id} returned ${r.status}`);
-          return null;
-        }
-        return await r.json();
-      } catch (e) {
-        console.warn(`TO header fetch ${id} error:`, e.message);
-        return null;
-      }
-    });
-
-    const allTos = (await Promise.all(detailPromises)).filter((x) => x && x.id);
-
-    // ─── Step 3: filter to open statuses AND source-location match in JS ───
-    // REST-side `location.id` is the source location (detail endpoint
-    // proved this: TO 523165 has REST location.id = 5 = Backroom source).
-    // Use that as the source-of-truth for source filtering, regardless of
-    // which SuiteQL field matched.
-    const tos = allTos.filter((to) => {
+    // 3. Filter: open status + source location = requested
+    const tos = headers.filter((to) => {
       if (!isOpenStatus(to.status)) return false;
       const src = to.location?.id != null ? Number(to.location.id) : null;
       return src === locationId;
     });
 
-    // ─── Step 4: lock-state merge via KV ───
+    // 4. KV lock merge
     const sessions = await Promise.all(
       tos.map((to) => kv.get(KEY_SESSION_BY_TO(String(to.id))))
     );
 
-    // ─── Shape response per §4.1 ───
-    // lineCount / totalQty are null (omitted). Computing them would require
-    // per-TO line queries which would double/triple the request count.
-    // Session 4+ can add them on demand if the UI surfaces those numbers.
     const orders = tos.map((to, i) => {
       const sess = sessions[i];
       const srcLoc = to.location || {};
@@ -157,7 +169,6 @@ export default async function handler(req, res) {
       };
     });
 
-    // Sort by date descending (most recent first). Default NS order isn't reliable.
     orders.sort((a, b) => (b.orderDate || "").localeCompare(a.orderDate || ""));
 
     return res.status(200).json({ orders });
