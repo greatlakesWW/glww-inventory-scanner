@@ -49,7 +49,9 @@ export default async function handler(req, res) {
     // record schema — `status` isn't a filterable field on transferOrder
     // (returns NONEXISTENT_FIELD). So we only filter by location here and
     // do the status filter in JS after fetching each record's details.
-    const qExpr = `location IS ${locationId}`;
+    // Reference fields use ANY_OF, not IS (IS is for string fields). Even for
+    // a single value, REST search requires the list form.
+    const qExpr = `location ANY_OF [${locationId}]`;
     const baseUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/transferOrder`;
     const queryParams = { q: qExpr, limit: "100" };
     const qs = `q=${encodeURIComponent(qExpr)}&limit=100`;
