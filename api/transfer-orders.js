@@ -80,14 +80,27 @@ async function fetchHeader(config, id) {
   const fieldList = "id,tranId,tranDate,status,location,transferLocation";
   const qp = { fields: fieldList };
   const fullUrl = `${baseUrl}?fields=${encodeURIComponent(fieldList)}`;
-  const authHeader = generateOAuthHeader("GET", baseUrl, qp, config);
-  try {
-    const r = await fetch(fullUrl, { method: "GET", headers: { Authorization: authHeader } });
-    if (!r.ok) return null;
-    return await r.json();
-  } catch {
-    return null;
+  // Retry once on 429 with a short backoff — NS Integration Governance
+  // sometimes blocks bursts even under the concurrency cap.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const authHeader = generateOAuthHeader("GET", baseUrl, qp, config);
+    try {
+      const r = await fetch(fullUrl, { method: "GET", headers: { Authorization: authHeader } });
+      if (r.ok) return await r.json();
+      if (r.status === 429 && attempt < 2) {
+        await new Promise((res) => setTimeout(res, 250 * (attempt + 1)));
+        continue;
+      }
+      return null;
+    } catch {
+      if (attempt < 2) {
+        await new Promise((res) => setTimeout(res, 250 * (attempt + 1)));
+        continue;
+      }
+      return null;
+    }
   }
+  return null;
 }
 
 // Run N async tasks with a concurrency cap to avoid opening 132+ sockets at once.
@@ -129,8 +142,11 @@ export default async function handler(req, res) {
     // 1. All TO ids
     const ids = await listAllTransferOrderIds(config);
 
-    // 2. Headers in parallel with concurrency cap
-    const headers = (await mapWithConcurrency(ids, 20, (id) => fetchHeader(config, id)))
+    // 2. Headers in parallel. Concurrency cap of 3 stays well under typical
+    // NS Integration Governance limits (5 concurrent requests on the
+    // default integration tier). For ~132 TOs this serializes to ~44
+    // rounds of 3 = roughly 4-8 sec depending on NS latency.
+    const headers = (await mapWithConcurrency(ids, 3, (id) => fetchHeader(config, id)))
       .filter((h) => h && h.id);
 
     // 3. Filter: open status + source location = requested
