@@ -1,10 +1,18 @@
-import { runSuiteQL, batchIds } from "../_suiteql.js";
+import { runSuiteQL, batchIds, getSuiteQLConfig } from "../_suiteql.js";
+import { generateOAuthHeader } from "../_auth.js";
 
 // ═══════════════════════════════════════════════════════════
 // GET /api/transfer-orders/:id
 //
-// Returns TO header + lines + per-line bin availability at the
-// source location. Powers the Pick Screen's initial data load.
+// Fetches TO header + lines via the NetSuite REST Record API
+// (not SuiteQL). The SuiteQL SEARCH channel has classified the
+// transactionline.quantityfulfilled field as NOT_EXPOSED, which
+// blocks the natural list-oriented query. The Record API returns
+// the same field as `quantityFulfilled` under a different
+// exposure path.
+//
+// Per-line bin availability still comes from SuiteQL
+// (inventorybalance.quantityonhand IS exposed).
 //
 // Source of truth: docs/FEATURE_SPEC_TO_FULFILLMENT.md §4.2
 // ═══════════════════════════════════════════════════════════
@@ -21,86 +29,92 @@ export default async function handler(req, res) {
   if (!rawId || typeof rawId !== "string") {
     return res.status(400).json({ error: "Missing ':id' path parameter" });
   }
-
   const toId = Number(rawId);
   if (!Number.isInteger(toId) || toId <= 0) {
     return res.status(400).json({ error: "':id' must be a positive integer" });
   }
 
   try {
-    // ─── Query 1: TO header ───
-    // Starts FROM transaction only — no transactionline join — to avoid
-    // the NetSuite SEARCH-channel NOT_EXPOSED rules that reject a join
-    // of `transaction` to `transactionline` even when filtered to one TO.
-    const headerQuery = `
-      SELECT
-        t.id AS internalid,
-        t.tranid AS tran_id,
-        t.location AS source_location_id,
-        BUILTIN.DF(t.location) AS source_location_name,
-        t.transferlocation AS destination_location_id,
-        BUILTIN.DF(t.transferlocation) AS destination_location_name,
-        BUILTIN.DF(t.status) AS status_name
-      FROM transaction t
-      WHERE t.id = ${toId}
-        AND t.type = 'TrnfrOrd'
-    `;
+    // ─── Step 1: Fetch TO via REST Record API ───
+    const config = getSuiteQLConfig(); // same 5-field credential check
+    const baseUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/transferOrder/${toId}`;
+    const queryParams = { expandSubResources: "true" };
+    const fullUrl = `${baseUrl}?expandSubResources=true`;
+    const authHeader = generateOAuthHeader("GET", baseUrl, queryParams, config);
 
-    const { items: headerRows } = await runSuiteQL(headerQuery);
-    if (headerRows.length === 0) {
+    const nsResp = await fetch(fullUrl, {
+      method: "GET",
+      headers: { Authorization: authHeader },
+    });
+
+    const nsText = await nsResp.text();
+    let to = null;
+    if (nsText) {
+      try { to = JSON.parse(nsText); } catch { to = null; }
+    }
+
+    if (nsResp.status === 404) {
       return res.status(404).json({ error: "Transfer order not found" });
     }
-    const header = headerRows[0];
-    const sourceLocationId = Number(header.source_location_id);
-
-    // ─── Query 2: TO lines ───
-    // Mirrors the production pattern in src/modules/TransferOrders.jsx:
-    //   FROM transactionline tl JOIN item ON tl.item = item.id
-    //   WHERE tl.transaction = {id} AND tl.mainline = 'F' ...
-    // This scope (FROM transactionline, WHERE tl.transaction = single id)
-    // is the narrow form NetSuite exposes `quantityfulfilled` through.
-    const linesQuery = `
-      SELECT
-        tl.id AS line_id,
-        tl.linesequencenumber AS line_number,
-        tl.item AS item_id,
-        item.itemid AS sku,
-        item.displayname AS item_name,
-        item.upccode AS upc,
-        tl.quantity AS ordered_qty,
-        tl.quantityfulfilled AS fulfilled_qty,
-        (tl.quantity - COALESCE(tl.quantityfulfilled, 0)) AS remaining_qty
-      FROM transactionline tl
-      JOIN item ON tl.item = item.id
-      WHERE tl.transaction = ${toId}
-        AND tl.mainline = 'F'
-        AND tl.itemtype IN ('InvtPart', 'Assembly', 'Kit')
-      ORDER BY tl.linesequencenumber
-    `;
-
-    const { items: lineRows } = await runSuiteQL(linesQuery);
-    if (lineRows.length === 0) {
-      // TO exists but has no eligible lines (fully fulfilled, or only shipping/tax lines).
-      // Return an empty lines array rather than 404 — the UI can render "Nothing to pick".
-      return res.status(200).json({
-        id: String(header.internalid),
-        tranId: header.tran_id,
-        sourceLocationId: String(header.source_location_id),
-        sourceLocationName: header.source_location_name,
-        destinationLocationId: header.destination_location_id != null ? String(header.destination_location_id) : null,
-        destinationLocationName: header.destination_location_name || null,
-        lines: [],
+    if (!nsResp.ok) {
+      console.error(`transferOrder GET ${toId} failed:`, nsResp.status, nsText.slice(0, 800));
+      return res.status(nsResp.status).json({
+        error: `NetSuite returned ${nsResp.status}`,
+        details: to || nsText,
       });
     }
+    if (!to || typeof to !== "object") {
+      return res.status(502).json({ error: "NetSuite returned unexpected response shape", details: nsText.slice(0, 500) });
+    }
 
-    // ─── Query 3: per-bin availability for all line items at the source ───
-    // Batch the IN (...) clause to stay under NetSuite's expression limits.
-    // inventorybalance.item is searchable, so IN works here (unlike
-    // transactionline.quantityfulfilled).
+    // ─── Extract header + lines ───
+    const sourceLocation = to.location || {};
+    const destinationLocation = to.transferLocation || {};
+    const sourceLocationId = sourceLocation.id != null ? Number(sourceLocation.id) : null;
+
+    // With expandSubResources=true, sublists come back as { totalResults, items: [...] }
+    // Defensive: support both `to.item.items` and `to.item` shapes, and skip non-inventory lines if a type is present.
+    const rawLines = Array.isArray(to.item)
+      ? to.item
+      : Array.isArray(to.item?.items)
+        ? to.item.items
+        : [];
+
+    // ─── Step 2: Enrich line items with SKU / UPC via SuiteQL item table ───
+    // REST response gives item: { id, refName } — refName is the display name,
+    // not the SKU. Pull sku/upc separately from the item table (which IS exposed to SuiteQL).
     const itemIds = [
-      ...new Set(lineRows.map((r) => Number(r.item_id)).filter((n) => Number.isInteger(n) && n > 0)),
+      ...new Set(
+        rawLines
+          .map((l) => Number(l.item?.id))
+          .filter((n) => Number.isInteger(n) && n > 0)
+      ),
     ];
 
+    const itemInfoById = {};
+    if (itemIds.length > 0) {
+      for (const batch of batchIds(itemIds, 200)) {
+        const itemQuery = `
+          SELECT
+            item.id AS id,
+            item.itemid AS sku,
+            item.displayname AS display_name,
+            item.upccode AS upc
+          FROM item
+          WHERE item.id IN (${batch.join(",")})
+        `;
+        const { items } = await runSuiteQL(itemQuery);
+        for (const r of items) {
+          itemInfoById[String(r.id)] = {
+            sku: r.sku || null,
+            displayName: r.display_name || null,
+            upc: r.upc || null,
+          };
+        }
+      }
+    }
+
+    // ─── Step 3: per-bin availability at source location ───
     const binRows = [];
     if (itemIds.length > 0 && Number.isInteger(sourceLocationId) && sourceLocationId > 0) {
       for (const batch of batchIds(itemIds, 200)) {
@@ -121,7 +135,6 @@ export default async function handler(req, res) {
       }
     }
 
-    // ─── Merge: group bins by item_id, attach to each line ───
     const binsByItem = {};
     for (const b of binRows) {
       const k = String(b.item_id);
@@ -134,25 +147,33 @@ export default async function handler(req, res) {
     }
 
     // ─── Shape response per §4.2 ───
+    const lines = rawLines.map((l) => {
+      const itemId = l.item?.id != null ? String(l.item.id) : null;
+      const info = itemId ? itemInfoById[itemId] : null;
+      const qtyOrdered = Number(l.quantity) || 0;
+      const qtyFulfilled = Number(l.quantityFulfilled) || 0;
+      return {
+        lineId: l.line != null ? String(l.line) : null,
+        lineNumber: l.line != null ? Number(l.line) : null,
+        itemId,
+        sku: info?.sku || null,
+        description: l.description || info?.displayName || l.item?.refName || null,
+        upc: info?.upc || null,
+        qtyOrdered,
+        qtyAlreadyFulfilled: qtyFulfilled,
+        qtyRemaining: Math.max(0, qtyOrdered - qtyFulfilled),
+        binAvailability: itemId ? (binsByItem[itemId] || []) : [],
+      };
+    });
+
     const response = {
-      id: String(header.internalid),
-      tranId: header.tran_id,
-      sourceLocationId: String(header.source_location_id),
-      sourceLocationName: header.source_location_name,
-      destinationLocationId: header.destination_location_id != null ? String(header.destination_location_id) : null,
-      destinationLocationName: header.destination_location_name || null,
-      lines: lineRows.map((r) => ({
-        lineId: String(r.line_id),
-        lineNumber: Number(r.line_number) || null,
-        itemId: String(r.item_id),
-        sku: r.sku,
-        description: r.item_name,
-        upc: r.upc || null,
-        qtyOrdered: Number(r.ordered_qty) || 0,
-        qtyAlreadyFulfilled: Number(r.fulfilled_qty) || 0,
-        qtyRemaining: Number(r.remaining_qty) || 0,
-        binAvailability: binsByItem[String(r.item_id)] || [],
-      })),
+      id: String(to.id),
+      tranId: to.tranId || null,
+      sourceLocationId: sourceLocation.id != null ? String(sourceLocation.id) : null,
+      sourceLocationName: sourceLocation.refName || null,
+      destinationLocationId: destinationLocation.id != null ? String(destinationLocation.id) : null,
+      destinationLocationName: destinationLocation.refName || null,
+      lines,
     };
 
     return res.status(200).json(response);
