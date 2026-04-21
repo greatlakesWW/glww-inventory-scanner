@@ -45,10 +45,11 @@ export default async function handler(req, res) {
     const config = getSuiteQLConfig();
 
     // ─── Step 1: list TOs via REST Record API ───
-    // Query syntax: NS REST Record API subset of SuiteQL. We filter to:
-    //   - location IS {id}       (source location for a transfer order)
-    //   - status ANY_OF [open statuses]
-    const qExpr = `location IS ${locationId} AND status ANY_OF ["${OPEN_STATUSES.join('","')}"]`;
+    // The REST Record API search query language is narrower than the full
+    // record schema — `status` isn't a filterable field on transferOrder
+    // (returns NONEXISTENT_FIELD). So we only filter by location here and
+    // do the status filter in JS after fetching each record's details.
+    const qExpr = `location IS ${locationId}`;
     const baseUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/transferOrder`;
     const queryParams = { q: qExpr, limit: "100" };
     const qs = `q=${encodeURIComponent(qExpr)}&limit=100`;
@@ -103,9 +104,32 @@ export default async function handler(req, res) {
         return null;
       }
     });
-    const tos = (await Promise.all(detailPromises)).filter((x) => x && x.id);
+    const allTos = (await Promise.all(detailPromises)).filter((x) => x && x.id);
 
-    // ─── Step 3: lock-state merge via KV ───
+    // ─── Step 3: filter to open statuses in JS ───
+    // REST returns status either as a string enum value ("partiallyFulfilled")
+    // or as { id, refName } where id is the enum value. Normalize either way.
+    // Also accept the display-name form ("Partially Fulfilled") that the REST
+    // API sometimes returns under refName only.
+    const openStatusKeys = new Set([
+      ...OPEN_STATUSES,                                    // enum form
+      ...OPEN_STATUSES.map((s) => s.toLowerCase()),        // belt + suspenders
+      "pending fulfillment",                               // display name forms
+      "partially fulfilled",
+    ]);
+    const isOpen = (to) => {
+      const raw = to.status;
+      const candidates = [];
+      if (typeof raw === "string") candidates.push(raw);
+      if (raw && typeof raw === "object") {
+        if (raw.id) candidates.push(String(raw.id));
+        if (raw.refName) candidates.push(String(raw.refName));
+      }
+      return candidates.some((c) => openStatusKeys.has(c) || openStatusKeys.has(c.toLowerCase()));
+    };
+    const tos = allTos.filter(isOpen);
+
+    // ─── Step 4: lock-state merge via KV ───
     const sessions = await Promise.all(
       tos.map((to) => kv.get(KEY_SESSION_BY_TO(String(to.id))))
     );
