@@ -1,27 +1,47 @@
 import { kv } from "@vercel/kv";
-import { getSuiteQLConfig } from "./_suiteql.js";
+import { runSuiteQL, getSuiteQLConfig } from "./_suiteql.js";
 import { generateOAuthHeader } from "./_auth.js";
 import { KEY_SESSION_BY_TO } from "./_kv.js";
 
 // ═══════════════════════════════════════════════════════════
 // GET /api/transfer-orders?location={id}
 //
-// Returns open Transfer Orders at the given source location.
-// Uses the REST Record API (NOT SuiteQL) because NetSuite has
-// classified key fields like `quantityfulfilled` as NOT_EXPOSED
-// for the SuiteQL SEARCH channel. The REST Record API has
-// different, more permissive exposure rules.
+// HYBRID flow:
+//   1. SuiteQL gets the list of TO internal IDs at the source location
+//      (no NOT_EXPOSED fields — just transaction header, which is safe).
+//   2. REST Record API fetches each TO's header fields (tranId, status,
+//      locations, date) because the REST endpoint has broader field
+//      exposure than SuiteQL's SEARCH channel.
+//   3. Status filter runs in JS over the fetched headers.
+//   4. KV merge adds lock state.
 //
-// Merges in live lock state from Vercel KV so the client can
-// render "In Progress by [name]" without a second round trip.
+// Why hybrid: SuiteQL has working location filtering on transaction; the
+// REST SEARCH language for transferOrder has an opaque `location` /
+// `transferLocation` vocabulary that didn't behave like the record shape.
+// Rather than keep guessing at the right REST search field, use SuiteQL
+// where it works and REST where we need the full field exposure.
 //
 // Source of truth: docs/FEATURE_SPEC_TO_FULFILLMENT.md §4.1
 // ═══════════════════════════════════════════════════════════
 
-// Accepted status values (REST Record API enum form). These map to
-// SuiteQL codes TrnfrOrd:B and TrnfrOrd:D respectively — the ones the
-// production TransferOrders module has always considered "open outbound".
-const OPEN_STATUSES = ["pendingFulfillment", "partiallyFulfilled"];
+// Statuses we consider "open outbound" — pickable. REST returns status as
+// either enum string, refName display, or {id, refName}. Normalize all.
+const OPEN_STATUS_TOKENS = new Set([
+  "pendingfulfillment",
+  "partiallyfulfilled",
+  "pending fulfillment",
+  "partially fulfilled",
+]);
+
+function isOpenStatus(raw) {
+  const candidates = [];
+  if (typeof raw === "string") candidates.push(raw);
+  if (raw && typeof raw === "object") {
+    if (raw.id) candidates.push(String(raw.id));
+    if (raw.refName) candidates.push(String(raw.refName));
+  }
+  return candidates.some((c) => OPEN_STATUS_TOKENS.has(c.toLowerCase()));
+}
 
 export default async function handler(req, res) {
   // ─── CORS ───
@@ -44,52 +64,27 @@ export default async function handler(req, res) {
   try {
     const config = getSuiteQLConfig();
 
-    // ─── Step 1: list TOs via REST Record API ───
-    // The REST Record API search query language is narrower than the full
-    // record schema — `status` isn't a filterable field on transferOrder
-    // (returns NONEXISTENT_FIELD). So we only filter by location here and
-    // do the status filter in JS after fetching each record's details.
-    // Reference fields use ANY_OF, not IS (IS is for string fields). Even for
-    // a single value, REST search requires the list form.
-    const qExpr = `location ANY_OF [${locationId}]`;
-    const baseUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/transferOrder`;
-    const queryParams = { q: qExpr, limit: "100" };
-    const qs = `q=${encodeURIComponent(qExpr)}&limit=100`;
-    const fullUrl = `${baseUrl}?${qs}`;
-    const authHeader = generateOAuthHeader("GET", baseUrl, queryParams, config);
+    // ─── Step 1: SuiteQL list of TO IDs at this location ───
+    // Safe query — only touches transaction header fields, no NOT_EXPOSED
+    // transactionline fields.
+    const idQuery = `
+      SELECT t.id AS internalid
+      FROM transaction t
+      WHERE t.type = 'TrnfrOrd'
+        AND t.location = ${locationId}
+    `;
+    const { items: idRows } = await runSuiteQL(idQuery);
+    const toIds = idRows.map((r) => Number(r.internalid)).filter((n) => Number.isInteger(n) && n > 0);
 
-    const listResp = await fetch(fullUrl, {
-      method: "GET",
-      headers: { Authorization: authHeader },
-    });
-
-    const listText = await listResp.text();
-    let listData = null;
-    if (listText) {
-      try { listData = JSON.parse(listText); } catch { listData = null; }
-    }
-    if (!listResp.ok) {
-      console.error(`transferOrder list failed:`, listResp.status, listText.slice(0, 800));
-      return res.status(listResp.status).json({
-        error: `NetSuite returned ${listResp.status}`,
-        details: listData || listText,
-      });
-    }
-
-    // Response shape: { totalResults, count, hasMore, items: [{ id, links: [...] }] }
-    const listItems = Array.isArray(listData?.items) ? listData.items : [];
-    if (listItems.length === 0) {
+    if (toIds.length === 0) {
       return res.status(200).json({ orders: [] });
     }
 
-    // ─── Step 2: fetch each TO's header fields in parallel ───
-    // The list response only gives { id, links }. We need tranId, status,
-    // location, transferLocation, trandate. Fetch minimal fields per record
-    // using ?fields=... to keep payload small.
+    // ─── Step 2: fetch headers via REST Record API in parallel ───
+    const baseUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/transferOrder`;
     const fieldList = "id,tranId,tranDate,status,location,transferLocation";
-    const detailPromises = listItems.map(async (item) => {
-      const id = item.id;
-      if (!id) return null;
+
+    const detailPromises = toIds.map(async (id) => {
       const recUrl = `${baseUrl}/${id}`;
       const recQp = { fields: fieldList };
       const recFullUrl = `${recUrl}?fields=${encodeURIComponent(fieldList)}`;
@@ -106,30 +101,11 @@ export default async function handler(req, res) {
         return null;
       }
     });
+
     const allTos = (await Promise.all(detailPromises)).filter((x) => x && x.id);
 
     // ─── Step 3: filter to open statuses in JS ───
-    // REST returns status either as a string enum value ("partiallyFulfilled")
-    // or as { id, refName } where id is the enum value. Normalize either way.
-    // Also accept the display-name form ("Partially Fulfilled") that the REST
-    // API sometimes returns under refName only.
-    const openStatusKeys = new Set([
-      ...OPEN_STATUSES,                                    // enum form
-      ...OPEN_STATUSES.map((s) => s.toLowerCase()),        // belt + suspenders
-      "pending fulfillment",                               // display name forms
-      "partially fulfilled",
-    ]);
-    const isOpen = (to) => {
-      const raw = to.status;
-      const candidates = [];
-      if (typeof raw === "string") candidates.push(raw);
-      if (raw && typeof raw === "object") {
-        if (raw.id) candidates.push(String(raw.id));
-        if (raw.refName) candidates.push(String(raw.refName));
-      }
-      return candidates.some((c) => openStatusKeys.has(c) || openStatusKeys.has(c.toLowerCase()));
-    };
-    const tos = allTos.filter(isOpen);
+    const tos = allTos.filter((to) => isOpenStatus(to.status));
 
     // ─── Step 4: lock-state merge via KV ───
     const sessions = await Promise.all(
@@ -137,15 +113,17 @@ export default async function handler(req, res) {
     );
 
     // ─── Shape response per §4.1 ───
-    // lineCount / totalQty are omitted (set to null) — aggregating those
-    // across many TOs would require N extra record fetches. Session 4+
-    // can add them per-row on demand if the UI needs them.
+    // lineCount / totalQty are null (omitted). Computing them would require
+    // per-TO line queries which would double/triple the request count.
+    // Session 4+ can add them on demand if the UI surfaces those numbers.
     const orders = tos.map((to, i) => {
       const sess = sessions[i];
       const srcLoc = to.location || {};
       const dstLoc = to.transferLocation || {};
       const rawStatus = to.status;
-      const statusName = typeof rawStatus === "string" ? rawStatus : rawStatus?.refName || null;
+      const statusName = typeof rawStatus === "string"
+        ? rawStatus
+        : rawStatus?.refName || rawStatus?.id || null;
       return {
         id: String(to.id),
         tranId: to.tranId || null,
@@ -162,7 +140,7 @@ export default async function handler(req, res) {
       };
     });
 
-    // Keep latest first — NS default order may already be this, but be explicit.
+    // Sort by date descending (most recent first). Default NS order isn't reliable.
     orders.sort((a, b) => (b.orderDate || "").localeCompare(a.orderDate || ""));
 
     return res.status(200).json({ orders });
