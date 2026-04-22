@@ -15,6 +15,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 const LS_PICKER_NAME = "glww_picker_name";
 const LS_DEVICE_ID = "glww_device_id";
 
+// Spec §3.2 — live-merge polling cadence. Paused by visibilitychange
+// so a hidden tab stops burning battery/bandwidth.
+const POLL_INTERVAL_MS = 4000;
+
 // Stable device id per browser — persisted once and reused. Used purely
 // for event-log attribution; if localStorage is unavailable we fall
 // back to an in-memory id (lost on reload, still unique per session).
@@ -56,7 +60,17 @@ export function usePickSession(toId) {
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
 
+  // Poll telemetry — surfaced to the UI as a live-indicator dot.
+  const [lastPolledAt, setLastPolledAt] = useState(null);
+  const [pollError, setPollError] = useState(null);
+
   const deviceId = useRef(getDeviceId()).current;
+
+  // Mirror of `busy` in a ref so the poller can read current value without
+  // registering `busy` as an effect dependency (which would tear down and
+  // re-spin up the interval on every PATCH).
+  const busyRef = useRef(false);
+  useEffect(() => { busyRef.current = busy; }, [busy]);
 
   // Initial phase: if we have a remembered picker name we still show
   // the name-entry card (prefilled) so the picker can type a different
@@ -291,6 +305,100 @@ export function usePickSession(toId) {
     }
   }, [session, deviceId, patchSession]);
 
+  // ─── Live-merge poller (Session 5, spec §3.2 / §5 / §7) ───
+  // Fires only while phase === "active" and the tab is visible. Guarded
+  // by busyRef so an in-flight PATCH never races with an overlapping GET
+  // response (merge rule keeps the newer updatedAt regardless, but
+  // suppressing during PATCH avoids the UI flicker).
+  const sessionId = session?.sessionId || null;
+  const ownerName = session?.pickerName || null;
+  useEffect(() => {
+    if (phase !== "active" || !sessionId) return;
+
+    let cancelled = false;
+    let timer = null;
+    let inFlight = false;
+
+    const doPoll = async () => {
+      if (cancelled || inFlight) return;
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      if (busyRef.current) return;
+
+      inFlight = true;
+      try {
+        const resp = await fetch(
+          `/api/pick-sessions/${encodeURIComponent(sessionId)}`
+        );
+        if (cancelled) return;
+
+        if (resp.status === 404) {
+          // Session expired (48h TTL) or was deleted by fulfillment (Session 6+).
+          setError("Session no longer exists on the server");
+          setPhase("error");
+          return;
+        }
+
+        const data = await readJson(resp);
+        if (!resp.ok) {
+          throw new Error(
+            (data && typeof data === "object" && data.error) ||
+              `API error ${resp.status}`
+          );
+        }
+
+        // Takeover detection: if the server says someone else owns this
+        // session now, stop scanning immediately. We check against the
+        // closed-over ownerName (from when this effect subscribed) rather
+        // than the current session.pickerName — that way a rapid self-
+        // takeOver() doesn't falsely trigger this path.
+        if (data?.pickerName && ownerName && data.pickerName !== ownerName) {
+          setError(`Session taken over by ${data.pickerName}`);
+          setPhase("error");
+          return;
+        }
+
+        // Replace-if-newer merge. The PATCH response is authoritative for
+        // local state; polled GETs only win when the server has moved on.
+        setSession((prev) => {
+          if (!prev) return data;
+          const prevTs = Date.parse(prev.updatedAt) || 0;
+          const nextTs = Date.parse(data?.updatedAt || "") || 0;
+          if (nextTs < prevTs) return prev;
+          return data;
+        });
+
+        setLastPolledAt(Date.now());
+        setPollError(null);
+      } catch (e) {
+        if (!cancelled) setPollError(e.message || "Poll failed");
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    // Fire immediately so the indicator lights up without a 4s delay,
+    // then fall into steady-state cadence.
+    doPoll();
+    timer = setInterval(doPoll, POLL_INTERVAL_MS);
+
+    // Fire an extra poll right when the tab regains visibility — pickers
+    // coming back from another app should see fresh state immediately.
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") doPoll();
+    };
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVisibility);
+    }
+
+    return () => {
+      cancelled = true;
+      if (timer) clearInterval(timer);
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVisibility);
+      }
+    };
+  }, [phase, sessionId, ownerName]);
+
   // ─── Name prefill for the entry form ───
   const rememberedName = (() => {
     try {
@@ -309,6 +417,8 @@ export function usePickSession(toId) {
     rememberedName,
     pickedByLine,
     pickedByLineBin,
+    lastPolledAt,
+    pollError,
     startSession,
     takeOver,
     recordScan,

@@ -54,6 +54,8 @@ export default function PickScreen({ to, onBack }) {
     busy,
     rememberedName,
     pickedByLine,
+    lastPolledAt,
+    pollError,
     startSession,
     takeOver,
     recordScan,
@@ -122,6 +124,16 @@ export default function PickScreen({ to, onBack }) {
     if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
     if (warnTimerRef.current) clearTimeout(warnTimerRef.current);
   }, []);
+
+  // Tick once a second while the live indicator is mounted so its
+  // "Ns ago" label stays honest without forcing the hook itself to
+  // rerender on a timer.
+  const [nowTick, setNowTick] = useState(Date.now());
+  useEffect(() => {
+    if (phase !== "active") return;
+    const t = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [phase]);
 
   // ─── Derived lookup maps from the TO detail ───
   // upcToLines: upc (exact string from scanner) -> array of lines that use it
@@ -441,22 +453,25 @@ export default function PickScreen({ to, onBack }) {
               <span style={{ color: "#475569", margin: "0 6px" }}>→</span>
               <span style={{ color: ACCENT, fontWeight: 600, ...mono }}>{detail.destinationLocationName || "—"}</span>
             </div>
-            <div
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 4,
-                padding: "3px 10px",
-                borderRadius: 20,
-                background: `${ACCENT}15`,
-                border: `1px solid ${ACCENT}30`,
-                fontSize: 11,
-                color: ACCENT,
-                fontWeight: 600,
-                ...mono,
-              }}
-            >
-              👤 {session?.pickerName || "—"}
+            <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              <LiveIndicator lastPolledAt={lastPolledAt} pollError={pollError} now={nowTick} />
+              <div
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 4,
+                  padding: "3px 10px",
+                  borderRadius: 20,
+                  background: `${ACCENT}15`,
+                  border: `1px solid ${ACCENT}30`,
+                  fontSize: 11,
+                  color: ACCENT,
+                  fontWeight: 600,
+                  ...mono,
+                }}
+              >
+                👤 {session?.pickerName || "—"}
+              </div>
             </div>
           </div>
 
@@ -756,5 +771,59 @@ function BinChip({ bin, current, preferred }) {
       📍 {bin.binNumber}
       {qty > 0 && <span style={{ opacity: 0.75 }}>·{qty}</span>}
     </span>
+  );
+}
+
+// ───────────────────────────────────────────────
+// LiveIndicator — small pulsing dot showing poll health.
+//
+// Green = polled within the last 10s (healthy).
+// Amber = last poll > 10s ago (stale; tab probably lost visibility or
+//         the network stalled, but we haven't given up).
+// Hidden until the first successful poll.
+// ───────────────────────────────────────────────
+function LiveIndicator({ lastPolledAt, pollError, now }) {
+  if (!lastPolledAt) return null;
+  const ageMs = Math.max(0, (now || Date.now()) - lastPolledAt);
+  const healthy = ageMs < 10_000;
+  const color = healthy ? "#22c55e" : "#f59e0b";
+  const secs = Math.floor(ageMs / 1000);
+  const label = healthy ? "Live" : `${secs}s ago`;
+  return (
+    <div
+      title={
+        pollError
+          ? `Poll error: ${pollError}`
+          : `Synced ${secs}s ago (spec: every 4s)`
+      }
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 5,
+        padding: "3px 8px",
+        borderRadius: 20,
+        background: healthy
+          ? "rgba(34,197,94,0.08)"
+          : "rgba(245,158,11,0.08)",
+        border: `1px solid ${healthy ? "rgba(34,197,94,0.3)" : "rgba(245,158,11,0.3)"}`,
+        fontSize: 10,
+        color,
+        fontWeight: 700,
+        letterSpacing: 0.3,
+        ...mono,
+      }}
+    >
+      <span
+        style={{
+          display: "inline-block",
+          width: 6,
+          height: 6,
+          borderRadius: "50%",
+          background: color,
+          animation: healthy ? "pulsingDot 1.6s ease-in-out infinite" : "none",
+        }}
+      />
+      {label}
+    </div>
   );
 }
