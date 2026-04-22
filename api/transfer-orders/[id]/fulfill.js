@@ -228,7 +228,19 @@ export default async function handler(req, res) {
   // Build lineMeta keyed by `l.line` — the REST Record API's line
   // identifier. Session events' `lineId` came from Session 2's detail
   // endpoint, which also reads `l.line` from REST, so they match.
-  // `orderLine` on the fulfillment transform payload uses the same value.
+  //
+  // NOTE on orderLine offset: NetSuite stores each inventory item as
+  // THREE sub-rows in transactionline (SuiteQL returns tl.id = 1,2,3
+  // for item A; 4,5,6 for item B; etc.). REST's `l.line` is the first
+  // of each triple (1, 4, 7...). But `!transform/itemFulfillment`
+  // expects `orderLine` to be the MIDDLE sub-row (2, 5, 8...), which
+  // we confirmed against an existing fulfillment on this TO
+  // (IF2921, item/2 → orderLine=2, corresponding to TO line 1).
+  // Offset is `l.line + 1`. Production TransferOrders.jsx uses SuiteQL
+  // `linesequencenumber` which returns 2, 5, 8... directly — same end
+  // result. Once SuiteQL can query `quantityfulfilled` again we can
+  // source these directly; for now the +1 offset is reliable for
+  // standard TO line structure.
   const rawLines = Array.isArray(to.item?.items)
     ? to.item.items
     : Array.isArray(to.item)
@@ -238,7 +250,7 @@ export default async function handler(req, res) {
   for (const l of rawLines) {
     if (l?.line == null) continue;
     lineMeta[String(l.line)] = {
-      orderLine: Number(l.line),
+      orderLine: Number(l.line) + 1, // transform line-offset; see note above
       itemId: l.item?.id != null ? String(l.item.id) : null,
       quantity: Number(l.quantity) || 0,
       quantityFulfilled: Number(l.quantityFulfilled) || 0,
@@ -275,7 +287,7 @@ export default async function handler(req, res) {
   // every eligible (remaining > 0) line at default qty — we MODIFY those
   // defaults via `orderLine`. Lines we don't include in the payload retain
   // their defaults...which would fulfill stock we didn't pick. So we also
-  // override un-picked lines to zero via itemreceive:false.
+  // override un-picked lines to zero via itemReceive:false.
   //
   // CRITICAL NOTE FOR DEBUGGING: the prior iteration included zero stubs
   // for every "remaining" line we computed from the TO, which triggered a
@@ -286,14 +298,14 @@ export default async function handler(req, res) {
   // rejects it, the diagnostic logging below will show us exactly which
   // orderLine numbers NS considers invalid.
   const fulfillmentLines = [];
-  // (a) the lines we picked — explicit qty + itemreceive:true
+  // (a) the lines we picked — explicit qty + itemReceive:true
   for (const [lid, roll] of Object.entries(lineRoll)) {
     const meta = lineMeta[lid];
     if (!meta) continue; // skip picks whose line isn't even on the TO anymore
     fulfillmentLines.push({
       orderLine: meta.orderLine,
       quantity: Number(roll.totalQty) || 0,
-      itemreceive: (Number(roll.totalQty) || 0) > 0,
+      itemReceive: (Number(roll.totalQty) || 0) > 0,
     });
   }
 
@@ -314,7 +326,7 @@ export default async function handler(req, res) {
     fulfillmentLines.push({
       orderLine: meta.orderLine,
       quantity: 0,
-      itemreceive: false,
+      itemReceive: false,
     });
   }
 
@@ -396,7 +408,7 @@ export default async function handler(req, res) {
     receiptLines.push({
       orderLine: meta.orderLine,
       quantity: picked,
-      itemreceive: true,
+      itemReceive: true,
       inventoryDetail: {
         inventoryAssignment: {
           items: [{ quantity: picked, binNumber: destBinNumber }],
@@ -413,7 +425,7 @@ export default async function handler(req, res) {
     receiptLines.push({
       orderLine: meta.orderLine,
       quantity: 0,
-      itemreceive: false,
+      itemReceive: false,
     });
   }
   const receiptPayload = { item: { items: receiptLines } };
