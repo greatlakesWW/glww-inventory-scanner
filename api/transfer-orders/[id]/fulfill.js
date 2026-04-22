@@ -29,16 +29,29 @@ import {
 
 const ERROR_LOG_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days per spec §4.8
 
+// Hardcoded GLWW default: location 3 = Sales Floor → bin F-01-0001.
+// Can be overridden by the NS_SALESFLOOR_BINS_JSON env var if the setup
+// ever changes or a new destination location needs to be added.
+const SALESFLOOR_BIN_DEFAULTS = {
+  "3": "F-01-0001",
+};
+
 function parseSalesfloorBins() {
   const raw = process.env.NS_SALESFLOOR_BINS_JSON;
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === "object") return parsed;
-  } catch (_) {
-    // fall through
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") {
+        // Merge env-var entries on top of the hardcoded defaults so the
+        // env var can add or override locations without losing the base.
+        return { ...SALESFLOOR_BIN_DEFAULTS, ...parsed };
+      }
+    } catch (_) {
+      // Malformed env var: fall back to defaults. Logged so ops can fix it.
+      console.warn("NS_SALESFLOOR_BINS_JSON is not valid JSON; using hardcoded defaults");
+    }
   }
-  return null;
+  return SALESFLOOR_BIN_DEFAULTS;
 }
 
 async function readJsonResp(resp) {
@@ -224,14 +237,17 @@ export default async function handler(req, res) {
     };
   }
 
-  // Resolve destination bin from env var.
+  // Resolve destination bin. Defaults to the hardcoded GLWW map (location 3
+  // → F-01-0001); NS_SALESFLOOR_BINS_JSON can add or override entries.
   const salesfloorMap = parseSalesfloorBins();
   if (!salesfloorMap || !salesfloorMap[destinationLocationId]) {
     return res.status(500).json({
       error:
-        "NS_SALESFLOOR_BINS_JSON missing or does not contain an entry for destination location " +
+        "No salesfloor bin configured for destination location " +
         destinationLocationId +
-        '. Set the env var to e.g. {"3":"F-01-0001"} and redeploy.',
+        '. Add it via NS_SALESFLOOR_BINS_JSON env var (e.g. {"' +
+        destinationLocationId +
+        '":"BIN-NUMBER"}) or extend SALESFLOOR_BIN_DEFAULTS in api/transfer-orders/[id]/fulfill.js.',
     });
   }
   const destBinNumber = String(salesfloorMap[destinationLocationId]);
