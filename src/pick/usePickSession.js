@@ -355,11 +355,26 @@ export function usePickSession(toId) {
         return;
       }
 
-      // Any other status: surface the error and bounce back to active so
-      // the picker can try again without losing scan state.
-      const message =
+      // Any other status: surface the error AND whatever NS detail we got
+      // back so the picker (and anyone tailing logs) can see exactly what
+      // NetSuite complained about without having to check function logs.
+      let message =
         (data && typeof data === "object" && (data.error || data.message)) ||
         `API error ${resp.status}`;
+      if (data && typeof data === "object" && data.details) {
+        let detailStr;
+        try {
+          detailStr =
+            typeof data.details === "string"
+              ? data.details
+              : JSON.stringify(data.details);
+        } catch {
+          detailStr = String(data.details);
+        }
+        if (detailStr && detailStr.length > 0) {
+          message += ` — ${detailStr.slice(0, 400)}`;
+        }
+      }
       setError(message);
       setPhase("active");
     } catch (e) {

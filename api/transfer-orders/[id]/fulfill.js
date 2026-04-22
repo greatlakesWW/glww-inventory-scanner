@@ -252,94 +252,56 @@ export default async function handler(req, res) {
   }
   const destBinNumber = String(salesfloorMap[destinationLocationId]);
 
-  // ─── Resolve binId → binNumber via inventorybalance (batched) ───
-  // Pull the bins we actually need. For each (item, binId) in lineRoll, we
-  // want the human-readable bin name to put in inventoryAssignment.
-  const itemIds = new Set();
-  const binIds = new Set();
-  for (const [lid, roll] of Object.entries(lineRoll)) {
-    const meta = lineMeta[lid];
-    if (meta?.itemId) itemIds.add(meta.itemId);
-    for (const bid of Object.keys(roll.binCounts)) {
-      if (bid) binIds.add(bid);
-    }
-  }
-
-  // Use inventorybalance to map (item, bin) -> bin_number. This is the same
-  // table the picker's UI uses to display binAvailability, so it definitely
-  // has rows for every bin the picker scanned from (they wouldn't have had
-  // a bin chip otherwise).
-  const binNameByBinId = {};
-  if (itemIds.size > 0 && binIds.size > 0) {
-    const itemList = [...itemIds].join(",");
-    const binList = [...binIds].join(",");
-    const query = `
-      SELECT DISTINCT ib.binnumber AS bin_id, BUILTIN.DF(ib.binnumber) AS bin_number
-      FROM inventorybalance ib
-      WHERE ib.item IN (${itemList})
-        AND ib.binnumber IN (${binList})
-    `;
-    try {
-      const qUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/query/v1/suiteql?limit=1000&offset=0`;
-      const authHeader = generateOAuthHeader("POST", qUrl.split("?")[0], { limit: "1000", offset: "0" }, config);
-      const qResp = await fetch(qUrl, {
-        method: "POST",
-        headers: { Authorization: authHeader, "Content-Type": "application/json", Prefer: "transient" },
-        body: JSON.stringify({ q: query }),
-      });
-      const qData = await readJsonResp(qResp);
-      if (qResp.ok && qData?.items) {
-        for (const r of qData.items) {
-          if (r.bin_id != null && r.bin_number) binNameByBinId[String(r.bin_id)] = String(r.bin_number);
-        }
-      }
-    } catch (e) {
-      console.warn("bin-number lookup failed:", e.message);
-    }
-  }
+  // Note: we previously resolved session binId → binNumber via inventorybalance
+  // so we could hand-pick source bins on the Item Fulfillment. That got
+  // rejected by NetSuite with USER_ERROR on the item sublist (the transform's
+  // inventoryAssignment is static). Production TransferOrders.jsx also omits
+  // inventoryDetail on the fulfillment and lets NetSuite auto-allocate source
+  // bins, which is what we now do too. The session still records which bins
+  // the picker physically pulled from (event log in KV) for audit purposes.
 
   // ─── Build Item Fulfillment payload ───
-  const fulfillmentLines = [];
-  const missingBinNames = [];
-  for (const [lid, roll] of Object.entries(lineRoll)) {
-    const meta = lineMeta[lid];
-    if (!meta) continue;
-    const assignments = [];
-    for (const [bid, qty] of Object.entries(roll.binCounts)) {
-      const binNumber = binNameByBinId[bid];
-      if (!binNumber) {
-        missingBinNames.push({ lineId: lid, binId: bid });
-        continue;
-      }
-      assignments.push({ quantity: qty, binNumber });
-    }
-    if (assignments.length === 0) continue;
-    fulfillmentLines.push({
+  //
+  // NS !transform/itemFulfillment pre-populates the fulfillment's item sublist
+  // with ONLY the remaining-to-ship lines (quantity > quantityFulfilled).
+  // Already-fulfilled lines are NOT in that sublist; referencing them by
+  // orderLine triggers "You are either trying to access a field on a
+  // non-existent line..." (400 USER_ERROR on path item).
+  //
+  // Production TransferOrders.jsx also does NOT include
+  // inventoryDetail.inventoryAssignment on the fulfillment — NS allocates
+  // source bins from whatever has stock. Trying to hand-pick bins here
+  // also triggers the static-sublist error because the pre-populated
+  // inventoryAssignment is static, not additive.
+  //
+  // Match production: for each ELIGIBLE line (remaining > 0), send
+  //   { orderLine, quantity, itemreceive }
+  // and nothing else. quantity is the amount the picker scanned for that
+  // line; unscanned eligible lines go through as quantity:0 / itemreceive:false
+  // to tell NS "skip this line on this fulfillment."
+  const eligibleLines = Object.values(lineMeta).filter(
+    (m) => m.quantity - m.quantityFulfilled > 0
+  );
+  if (eligibleLines.length === 0) {
+    return res.status(400).json({
+      error: "No remaining lines on this TO — nothing to fulfill",
+    });
+  }
+
+  const fulfillmentLines = eligibleLines.map((meta) => {
+    const lid = String(meta.orderLine);
+    const picked = Number(lineRoll[lid]?.totalQty) || 0;
+    return {
       orderLine: meta.orderLine,
-      quantity: roll.totalQty,
-      itemreceive: true,
-      inventoryDetail: { inventoryAssignment: { items: assignments } },
-    });
-  }
+      quantity: picked,
+      itemreceive: picked > 0,
+    };
+  });
 
-  if (missingBinNames.length > 0) {
-    return res.status(500).json({
-      error: "Could not resolve bin names for some picked bins",
-      details: missingBinNames,
+  if (!fulfillmentLines.some((l) => l.itemreceive)) {
+    return res.status(400).json({
+      error: "No scanned items match remaining lines on this TO",
     });
-  }
-  if (fulfillmentLines.length === 0) {
-    return res.status(400).json({ error: "No valid fulfillable lines after rollup" });
-  }
-
-  // Append itemreceive:false stubs for every TO line we're NOT fulfilling.
-  // NetSuite's transform treats missing lines as "keep as-is," but including
-  // the stubs makes the payload self-documenting and matches the existing
-  // TransferOrders production pattern.
-  const touchedLineIds = new Set(fulfillmentLines.map((e) => String(e.orderLine)));
-  for (const meta of Object.values(lineMeta)) {
-    if (touchedLineIds.has(String(meta.orderLine))) continue;
-    fulfillmentLines.push({ orderLine: meta.orderLine, itemreceive: false });
   }
 
   const fulfillmentPayload = { item: { items: fulfillmentLines } };
@@ -402,25 +364,33 @@ export default async function handler(req, res) {
   }
 
   // ─── STEP 10–11: Build and POST Item Receipt ───
-  const receiptLines = [];
-  for (const [lid, roll] of Object.entries(lineRoll)) {
-    const meta = lineMeta[lid];
-    if (!meta) continue;
-    receiptLines.push({
-      orderLine: meta.orderLine,
-      quantity: roll.totalQty,
-      itemreceive: true,
-      inventoryDetail: {
-        inventoryAssignment: {
-          items: [{ quantity: roll.totalQty, binNumber: destBinNumber }],
+  //
+  // Same shape rules as the fulfillment: only reference eligible lines
+  // (the receipt transform mirrors the fulfillment's sublist, which was
+  // filtered to remaining lines). Scanned lines get a per-bin
+  // inventoryDetail citing the destination salesfloor bin; unscanned
+  // eligible lines go through as itemreceive:false so NS knows to skip them.
+  const receiptLines = eligibleLines.map((meta) => {
+    const lid = String(meta.orderLine);
+    const picked = Number(lineRoll[lid]?.totalQty) || 0;
+    if (picked > 0) {
+      return {
+        orderLine: meta.orderLine,
+        quantity: picked,
+        itemreceive: true,
+        inventoryDetail: {
+          inventoryAssignment: {
+            items: [{ quantity: picked, binNumber: destBinNumber }],
+          },
         },
-      },
-    });
-  }
-  for (const meta of Object.values(lineMeta)) {
-    if (receiptLines.some((e) => Number(e.orderLine) === Number(meta.orderLine))) continue;
-    receiptLines.push({ orderLine: meta.orderLine, itemreceive: false });
-  }
+      };
+    }
+    return {
+      orderLine: meta.orderLine,
+      quantity: 0,
+      itemreceive: false,
+    };
+  });
   const receiptPayload = { item: { items: receiptLines } };
 
   const rcUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/itemFulfillment/${fulfillmentId}/!transform/itemReceipt`;
