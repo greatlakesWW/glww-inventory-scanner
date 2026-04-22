@@ -7,6 +7,8 @@ import {
 } from "../shared";
 import { usePickSession } from "./usePickSession";
 import TakeoverModal from "./TakeoverModal";
+import CompletePickModal from "./CompletePickModal";
+import { logActivity } from "../activityLog";
 
 // ═══════════════════════════════════════════════════════════
 // PickScreen — Pick Mode scan loop (Session 4)
@@ -56,11 +58,14 @@ export default function PickScreen({ to, onBack }) {
     pickedByLine,
     lastPolledAt,
     pollError,
+    fulfillmentResult,
+    stuckInfo,
     startSession,
     takeOver,
     recordScan,
     switchBin,
     pause,
+    completeFulfill,
   } = usePickSession(toId);
 
   // ─── TO detail fetch (lines + binAvailability) ───
@@ -96,6 +101,7 @@ export default function PickScreen({ to, onBack }) {
   const [flash, setFlash] = useState(null);
   const [transientError, setTransientError] = useState(null);
   const [transientWarn, setTransientWarn] = useState(null);
+  const [showCompleteModal, setShowCompleteModal] = useState(false);
 
   const flashTimerRef = useRef(null);
   const errorTimerRef = useRef(null);
@@ -371,6 +377,44 @@ export default function PickScreen({ to, onBack }) {
     );
   }
 
+  // ─── Completing (fulfill POST in flight) ───
+  if (phase === "completing") {
+    return (
+      <div style={S.root}>
+        <style>{FONT}{ANIMATIONS}</style>
+        <Header tranId={to.tranId} onBack={onBack} />
+        <div style={{ padding: "40px 16px" }}>
+          <PulsingDot color={ACCENT} label="Creating fulfillment + receipt in NetSuite..." />
+          <div style={{ fontSize: 11, color: "#64748b", textAlign: "center", marginTop: 12 }}>
+            Do not close this tab.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ─── Complete (happy terminal) ───
+  if (phase === "complete") {
+    return (
+      <CompleteScreen
+        tranId={to.tranId}
+        result={fulfillmentResult}
+        onBack={onBack}
+      />
+    );
+  }
+
+  // ─── Stuck (fulfillment ok, receipt failed) ───
+  if (phase === "stuck") {
+    return (
+      <StuckScreen
+        tranId={to.tranId}
+        stuckInfo={stuckInfo}
+        onBack={onBack}
+      />
+    );
+  }
+
   // ─── Paused / error terminal ───
   if (phase === "paused") {
     return (
@@ -424,7 +468,7 @@ export default function PickScreen({ to, onBack }) {
     <div style={S.root}>
       <style>{FONT}{ANIMATIONS}</style>
 
-      {/* Sticky header with Pause button */}
+      {/* Sticky header with Pause + Complete Pick buttons */}
       <div style={S.hdr}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <Logo />
@@ -432,15 +476,31 @@ export default function PickScreen({ to, onBack }) {
             Pick: {to.tranId || `#${toId}`}
           </span>
         </div>
-        <button
-          onClick={async () => {
-            try { await pause(); } catch { /* hook sets phase=error on takeover */ }
-          }}
-          disabled={busy}
-          style={{ ...S.btnSm, fontSize: 12, background: "rgba(245,158,11,0.12)", color: "#f59e0b", borderColor: "rgba(245,158,11,0.3)" }}
-        >
-          {busy ? "…" : "⏸ Pause"}
-        </button>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button
+            onClick={async () => {
+              try { await pause(); } catch { /* hook sets phase=error on takeover */ }
+            }}
+            disabled={busy}
+            style={{ ...S.btnSm, fontSize: 12, background: "rgba(245,158,11,0.12)", color: "#f59e0b", borderColor: "rgba(245,158,11,0.3)" }}
+          >
+            {busy ? "…" : "⏸ Pause"}
+          </button>
+          <button
+            onClick={() => setShowCompleteModal(true)}
+            disabled={busy || Object.keys(pickedByLine).length === 0}
+            style={{
+              ...S.btnSm,
+              fontSize: 12,
+              background: "rgba(34,197,94,0.12)",
+              color: "#22c55e",
+              borderColor: "rgba(34,197,94,0.3)",
+              opacity: Object.keys(pickedByLine).length === 0 ? 0.45 : 1,
+            }}
+          >
+            ✓ Complete
+          </button>
+        </div>
       </div>
 
       <div style={{ padding: "16px 16px 120px" }}>
@@ -585,6 +645,21 @@ export default function PickScreen({ to, onBack }) {
           </div>
         </div>
       </div>
+
+      {/* Complete Pick confirmation modal (spec §2 step 10) */}
+      {showCompleteModal && (
+        <CompletePickModal
+          detail={detail}
+          pickedByLine={pickedByLine}
+          busy={busy}
+          error={sessionError}
+          onConfirm={async () => {
+            setShowCompleteModal(false);
+            try { await completeFulfill(); } catch { /* handled in hook */ }
+          }}
+          onCancel={() => setShowCompleteModal(false)}
+        />
+      )}
     </div>
   );
 }
@@ -824,6 +899,210 @@ function LiveIndicator({ lastPolledAt, pollError, now }) {
         }}
       />
       {label}
+    </div>
+  );
+}
+
+// ───────────────────────────────────────────────
+// CompleteScreen — success terminal after fulfill + receipt
+// ───────────────────────────────────────────────
+function CompleteScreen({ tranId, result, onBack }) {
+  // Fire the activity log exactly once on mount.
+  useEffect(() => {
+    if (!result) return;
+    const nsRecord = [
+      result.fulfillmentId && `IF #${result.fulfillmentId}`,
+      result.receiptId && `IR #${result.receiptId}`,
+    ]
+      .filter(Boolean)
+      .join(" / ");
+    try {
+      logActivity({
+        module: "pick-mode",
+        action: "fulfillment-created",
+        status: "success",
+        sourceDocument: `TO #${result.tranId || tranId || ""}`.trim(),
+        netsuiteRecord: nsRecord || null,
+        details: result.fullyFulfilled ? "Fully fulfilled" : "Partially fulfilled",
+      });
+    } catch { /* logActivity never throws but be defensive */ }
+  }, [result, tranId]);
+
+  return (
+    <div style={S.root}>
+      <style>{FONT}{ANIMATIONS}</style>
+      <Header tranId={tranId} onBack={onBack} />
+      <div style={{ padding: "40px 16px", textAlign: "center" }}>
+        <div
+          style={{
+            width: 64,
+            height: 64,
+            borderRadius: "50%",
+            margin: "0 auto 16px",
+            background: "rgba(34,197,94,0.15)",
+            border: "2px solid rgba(34,197,94,0.4)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 28,
+            color: "#22c55e",
+            fontWeight: 700,
+          }}
+        >
+          ✓
+        </div>
+        <div style={{ fontSize: 18, fontWeight: 700, color: "#22c55e", marginBottom: 8 }}>
+          {result?.fullyFulfilled ? "TO complete" : "Partial fulfillment complete"}
+        </div>
+        <div style={{ fontSize: 13, color: "#94a3b8", marginBottom: 20 }}>
+          {result?.fullyFulfilled
+            ? "All remaining lines fulfilled and received."
+            : "Picked items were fulfilled and received. The TO stays open for the remaining lines."}
+        </div>
+
+        {(result?.fulfillmentId || result?.receiptId) && (
+          <div
+            style={{
+              ...S.card,
+              maxWidth: 360,
+              margin: "0 auto 20px",
+              textAlign: "left",
+              background: "rgba(34,197,94,0.04)",
+              border: "1px solid rgba(34,197,94,0.15)",
+            }}
+          >
+            <div style={S.lbl}>NetSuite transactions</div>
+            {result?.fulfillmentId && (
+              <div style={{ fontSize: 12, ...mono, color: "#e2e8f0", marginTop: 4 }}>
+                Item Fulfillment · <span style={{ color: "#22c55e" }}>#{result.fulfillmentId}</span>
+              </div>
+            )}
+            {result?.receiptId && (
+              <div style={{ fontSize: 12, ...mono, color: "#e2e8f0", marginTop: 2 }}>
+                Item Receipt · <span style={{ color: "#22c55e" }}>#{result.receiptId}</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        <button
+          style={{ ...S.btn, background: ACCENT, maxWidth: 280, margin: "0 auto" }}
+          onClick={onBack}
+        >
+          Back to TO List
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ───────────────────────────────────────────────
+// StuckScreen — receipt failed after fulfillment succeeded
+// ───────────────────────────────────────────────
+function StuckScreen({ tranId, stuckInfo, onBack }) {
+  useEffect(() => {
+    if (!stuckInfo) return;
+    try {
+      logActivity({
+        module: "pick-mode",
+        action: "fulfillment-stuck",
+        status: "error",
+        sourceDocument: `TO #${tranId || ""}`.trim(),
+        netsuiteRecord: stuckInfo.fulfillmentId ? `IF #${stuckInfo.fulfillmentId}` : null,
+        error: stuckInfo.errorMessage || "Receipt failed after fulfillment",
+      });
+    } catch { /* ignore */ }
+  }, [stuckInfo, tranId]);
+
+  return (
+    <div style={S.root}>
+      <style>{FONT}{ANIMATIONS}</style>
+      <Header tranId={tranId} onBack={onBack} />
+      <div style={{ padding: "32px 16px" }}>
+        <div
+          style={{
+            ...S.card,
+            background: "rgba(245,158,11,0.08)",
+            border: "1px solid rgba(245,158,11,0.35)",
+            padding: 20,
+            maxWidth: 520,
+            margin: "0 auto",
+          }}
+        >
+          <div
+            style={{
+              fontSize: 11,
+              color: "#f59e0b",
+              textTransform: "uppercase",
+              letterSpacing: 0.5,
+              fontWeight: 700,
+              marginBottom: 6,
+            }}
+          >
+            ⚠ Receipt pending
+          </div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: "#e2e8f0", marginBottom: 10 }}>
+            Stock was recorded as picked in NetSuite, but the receipt didn't land.
+          </div>
+          <div style={{ fontSize: 13, color: "#e2e8f0", marginBottom: 12 }}>
+            <strong style={{ color: "#f59e0b" }}>Do NOT put the stock back</strong> — it's in
+            transit according to NetSuite. Finish putting it in the salesfloor bin and tell
+            an admin to retry the receipt.
+          </div>
+
+          {stuckInfo?.fulfillmentId && (
+            <div
+              style={{
+                marginTop: 12,
+                padding: "10px 12px",
+                background: "rgba(0,0,0,0.2)",
+                border: "1px solid rgba(255,255,255,0.06)",
+                borderRadius: 6,
+                fontSize: 12,
+                ...mono,
+                color: "#e2e8f0",
+              }}
+            >
+              <div style={S.lbl}>Item Fulfillment ID (for admin)</div>
+              <div style={{ fontSize: 15, marginTop: 4, color: "#f59e0b", fontWeight: 700 }}>
+                #{stuckInfo.fulfillmentId}
+              </div>
+            </div>
+          )}
+
+          {stuckInfo?.errorMessage && (
+            <div
+              style={{
+                marginTop: 12,
+                fontSize: 11,
+                color: "#94a3b8",
+                ...mono,
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+              }}
+            >
+              {stuckInfo.errorMessage}
+            </div>
+          )}
+
+          <div
+            style={{
+              marginTop: 14,
+              fontSize: 11,
+              color: "#64748b",
+              fontStyle: "italic",
+            }}
+          >
+            Automatic retry will be added in a future update.
+          </div>
+        </div>
+
+        <div style={{ maxWidth: 520, margin: "16px auto 0" }}>
+          <button style={{ ...S.btn, background: "#475569" }} onClick={onBack}>
+            Back to TO List
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -53,6 +53,9 @@ export function usePickSession(toId) {
   // "takeover"   - 409 received, TakeoverModal is surfaced
   // "active"     - session owned by this browser, scanning allowed
   // "paused"     - pause event acknowledged
+  // "completing" - POST /api/transfer-orders/:id/fulfill in flight  (Session 6)
+  // "complete"   - fulfillment + receipt both created, session deleted (Session 6)
+  // "stuck"      - fulfillment created but receipt failed (207 partial) (Session 6)
   // "error"      - non-recoverable state; UI shows Back
   const [phase, setPhase] = useState("loading");
   const [session, setSession] = useState(null);
@@ -63,6 +66,10 @@ export function usePickSession(toId) {
   // Poll telemetry — surfaced to the UI as a live-indicator dot.
   const [lastPolledAt, setLastPolledAt] = useState(null);
   const [pollError, setPollError] = useState(null);
+
+  // Session 6 — Complete Pick terminal states.
+  const [fulfillmentResult, setFulfillmentResult] = useState(null); // { fulfillmentId, receiptId, fullyFulfilled, tranId }
+  const [stuckInfo, setStuckInfo] = useState(null); // { fulfillmentId, errorMessage, retryUrl }
 
   const deviceId = useRef(getDeviceId()).current;
 
@@ -305,6 +312,64 @@ export function usePickSession(toId) {
     }
   }, [session, deviceId, patchSession]);
 
+  // ─── Session 6 — Complete Pick (creates Item Fulfillment + Receipt in NetSuite) ───
+  // Flips to a terminal phase ("complete" on full success, "stuck" on 207
+  // partial_success). "error" status is surfaced but phase stays "active"
+  // so the picker can retry without losing scan state.
+  const completeFulfill = useCallback(async () => {
+    if (!session?.sessionId) throw new Error("No active session");
+    if (!toId) throw new Error("Missing TO id");
+    setBusy(true);
+    setError(null);
+    setPhase("completing");
+    try {
+      const resp = await fetch(
+        `/api/transfer-orders/${encodeURIComponent(toId)}/fulfill`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId: session.sessionId }),
+        }
+      );
+      const data = await readJson(resp);
+
+      if (resp.status === 200 && data) {
+        setFulfillmentResult({
+          fulfillmentId: data.fulfillmentId || null,
+          receiptId: data.receiptId || null,
+          fullyFulfilled: !!data.fullyFulfilled,
+          tranId: data.tranId || null,
+        });
+        setPhase("complete");
+        return;
+      }
+
+      if (resp.status === 207 && data) {
+        // Fulfillment succeeded, receipt failed — spec §4.6 step 13.
+        setStuckInfo({
+          fulfillmentId: data.fulfillmentId || null,
+          errorMessage: data.errorMessage || "Item Receipt failed after fulfillment was created",
+          retryUrl: data.retryUrl || null,
+        });
+        setPhase("stuck");
+        return;
+      }
+
+      // Any other status: surface the error and bounce back to active so
+      // the picker can try again without losing scan state.
+      const message =
+        (data && typeof data === "object" && (data.error || data.message)) ||
+        `API error ${resp.status}`;
+      setError(message);
+      setPhase("active");
+    } catch (e) {
+      setError(e.message || "Complete Pick failed");
+      setPhase("active");
+    } finally {
+      setBusy(false);
+    }
+  }, [session, toId]);
+
   // ─── Live-merge poller (Session 5, spec §3.2 / §5 / §7) ───
   // Fires only while phase === "active" and the tab is visible. Guarded
   // by busyRef so an in-flight PATCH never races with an overlapping GET
@@ -419,10 +484,13 @@ export function usePickSession(toId) {
     pickedByLineBin,
     lastPolledAt,
     pollError,
+    fulfillmentResult,
+    stuckInfo,
     startSession,
     takeOver,
     recordScan,
     switchBin,
     pause,
+    completeFulfill,
   };
 }
