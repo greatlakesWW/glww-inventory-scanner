@@ -81,6 +81,7 @@ export default function CompletePickModal({
       <div
         style={{
           ...S.card,
+          background: "#111827", // solid — matches app header, no show-through
           maxWidth: 560,
           width: "100%",
           padding: 0,
