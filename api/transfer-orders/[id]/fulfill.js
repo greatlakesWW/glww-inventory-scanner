@@ -1,5 +1,5 @@
 import { kv } from "@vercel/kv";
-import { getSuiteQLConfig } from "../../_suiteql.js";
+import { getSuiteQLConfig, runSuiteQL } from "../../_suiteql.js";
 import { generateOAuthHeader } from "../../_auth.js";
 import {
   getSessionBySessionId,
@@ -195,12 +195,23 @@ export default async function handler(req, res) {
   }
 
   // ─── Load TO header + lines via REST Record API ───
-  // Need: destinationLocationId, per-line { orderLine, itemId }, and bin names
-  // for each (item, binId) combination seen in lineRoll.
-  const toUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/transferOrder/${toId}?expandSubResources=true`;
+  // Need: destinationLocationId, and per-line { orderLine, itemId, quantity,
+  // quantityFulfilled } for eligibility filtering.
+  //
+  // IMPORTANT: the REST Record API's `line` field and SuiteQL's
+  // `transactionline.linesequencenumber` are NOT guaranteed to agree,
+  // and the transform's `item` sublist validates `orderLine` against the
+  // SuiteQL view. Production `src/modules/TransferOrders.jsx` reads lines
+  // via SuiteQL and its fulfillment POST works — mirror that exactly.
+  // SuiteQL can query `quantityfulfilled` when scoped to a single
+  // transaction (verified in Session 2's detail endpoint).
+  //
+  // Header (destinationLocationId, tranId) still comes from REST because
+  // that path already works and isn't the source of the error.
+  const toHeaderUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/transferOrder/${toId}?fields=id,tranId,location,transferLocation`;
   let to;
   try {
-    const toResp = await nsGet(toUrl, config);
+    const toResp = await nsGet(toHeaderUrl, config);
     const toData = await readJsonResp(toResp);
     if (!toResp.ok) {
       return res.status(toResp.status || 500).json({
@@ -222,19 +233,40 @@ export default async function handler(req, res) {
     return res.status(502).json({ error: "TO has no destination location" });
   }
 
-  // Flatten NS line sublist (expandSubResources packs them into to.item.items)
-  const rawLines = Array.isArray(to.item?.items) ? to.item.items : Array.isArray(to.item) ? to.item : [];
-
-  // Map lineId (string) -> { orderLine, itemId }
+  // Lines via SuiteQL — same query shape as production
+  // src/modules/TransferOrders.jsx. Keyed by internal line id (tl.id) so we
+  // can match session events' lineId; orderLine is tl.linesequencenumber,
+  // which is what the transform's item sublist validates against.
   const lineMeta = {};
-  for (const l of rawLines) {
-    if (l?.line == null) continue;
-    lineMeta[String(l.line)] = {
-      orderLine: Number(l.line),
-      itemId: l.item?.id != null ? String(l.item.id) : null,
-      quantity: Number(l.quantity) || 0,
-      quantityFulfilled: Number(l.quantityFulfilled) || 0,
-    };
+  try {
+    const linesQuery = `
+      SELECT tl.id AS line_id,
+             tl.linesequencenumber AS line_number,
+             tl.item AS item_id,
+             tl.quantity AS ordered_qty,
+             tl.quantityfulfilled AS fulfilled_qty
+      FROM transactionline tl
+      WHERE tl.transaction = ${toId}
+        AND tl.mainline = 'F'
+        AND tl.itemtype IN ('InvtPart', 'Assembly', 'Kit')
+        AND (tl.quantity - COALESCE(tl.quantityfulfilled, 0)) > 0
+      ORDER BY tl.linesequencenumber
+    `;
+    const { items } = await runSuiteQL(linesQuery);
+    for (const r of items) {
+      const lid = String(r.line_id);
+      lineMeta[lid] = {
+        orderLine: Number(r.line_number),
+        itemId: r.item_id != null ? String(r.item_id) : null,
+        quantity: Number(r.ordered_qty) || 0,
+        quantityFulfilled: Number(r.fulfilled_qty) || 0,
+      };
+    }
+  } catch (e) {
+    return res.status(e.status || 500).json({
+      error: `Loading TO lines via SuiteQL failed: ${e.message}`,
+      details: e.body || null,
+    });
   }
 
   // Resolve destination bin. Defaults to the hardcoded GLWW map (location 3
@@ -316,6 +348,9 @@ export default async function handler(req, res) {
     if (ffText) { try { ffData = JSON.parse(ffText); } catch { ffData = ffText; } }
     if (!(ffResp.status === 204 || ffResp.status === 200 || ffResp.status === 201)) {
       console.error("Item Fulfillment create failed:", ffResp.status, ffText.slice(0, 600));
+      console.error("Item Fulfillment request payload:", JSON.stringify(fulfillmentPayload));
+      console.error("Item Fulfillment eligibleLines summary:", JSON.stringify(eligibleLines));
+      console.error("Session lineRoll summary:", JSON.stringify(lineRoll));
       await logFulfillmentError({
         timestamp: new Date().toISOString(),
         toId: String(toId),
