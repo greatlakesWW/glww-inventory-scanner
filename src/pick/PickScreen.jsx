@@ -593,16 +593,22 @@ function Header({ tranId, onBack }) {
 }
 
 function LineRow({ line, picked, done, highlighted, qtyInCurrentBin, currentBinKey }) {
-  // "Preferred" bin = the one with the most on-hand. We sort descending by
-  // qtyOnHand so the first chip is the best place to look first, with other
-  // candidates shown after. If the line is currently highlighted (its bin
-  // IS the scanned bin), we skip re-printing the pill to avoid visual noise.
+  // "Preferred" bin = the lowest bin number (e.g., B-01-0001 before B-01-0002).
+  // This matches how pickers walk the warehouse — aisle-by-aisle in order —
+  // rather than chasing whichever bin holds the most stock. localeCompare with
+  // numeric: true handles natural sort so B-01-0010 comes after B-01-0002
+  // instead of after B-01-0001.
   const otherBins = !done
     ? (line.binAvailability || [])
         .filter((b) => b && b.binNumber)
         .filter((b) => (currentBinKey ? String(b.binNumber).toUpperCase() !== currentBinKey : true))
         .slice()
-        .sort((a, b) => (Number(b.qtyOnHand) || 0) - (Number(a.qtyOnHand) || 0))
+        .sort((a, b) =>
+          String(a.binNumber).localeCompare(String(b.binNumber), undefined, {
+            numeric: true,
+            sensitivity: "base",
+          })
+        )
     : [];
 
   return (
