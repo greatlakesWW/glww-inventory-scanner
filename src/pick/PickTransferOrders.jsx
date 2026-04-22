@@ -1,7 +1,7 @@
 import { useState } from "react";
 import LocationPicker from "./LocationPicker";
 import TOListScreen from "./TOListScreen";
-import PickScreenStub from "./PickScreenStub";
+import PickScreen from "./PickScreen";
 
 // ═══════════════════════════════════════════════════════════
 // PickTransferOrders — Pick Mode module root
@@ -9,7 +9,7 @@ import PickScreenStub from "./PickScreenStub";
 // Owns the phase state for the picker flow:
 //   "location" → LocationPicker
 //   "list"     → TOListScreen for selected location
-//   "pick"     → PickScreenStub (Session 3 stub; Session 4 replaces)
+//   "pick"     → PickScreen (scan loop, spec §5)
 //
 // No localStorage persistence at this level — users re-pick a
 // location if they navigate away. Once a pick session is created
@@ -53,9 +53,8 @@ export default function PickTransferOrders({ onBack }) {
 
   if (phase === "pick") {
     return (
-      <PickScreenStub
-        toId={selectedTo?.id}
-        tranId={selectedTo?.tranId}
+      <PickScreen
+        to={selectedTo}
         onBack={() => {
           setSelectedTo(null);
           setPhase("list");
