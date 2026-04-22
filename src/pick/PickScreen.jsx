@@ -563,6 +563,7 @@ export default function PickScreen({ to, onBack }) {
                   done={done}
                   highlighted={!!inCurrentBin && !done}
                   qtyInCurrentBin={qtyHere}
+                  currentBinKey={binKey}
                 />
               );
             })}
@@ -591,7 +592,19 @@ function Header({ tranId, onBack }) {
   );
 }
 
-function LineRow({ line, picked, done, highlighted, qtyInCurrentBin }) {
+function LineRow({ line, picked, done, highlighted, qtyInCurrentBin, currentBinKey }) {
+  // "Preferred" bin = the one with the most on-hand. We sort descending by
+  // qtyOnHand so the first chip is the best place to look first, with other
+  // candidates shown after. If the line is currently highlighted (its bin
+  // IS the scanned bin), we skip re-printing the pill to avoid visual noise.
+  const otherBins = !done
+    ? (line.binAvailability || [])
+        .filter((b) => b && b.binNumber)
+        .filter((b) => (currentBinKey ? String(b.binNumber).toUpperCase() !== currentBinKey : true))
+        .slice()
+        .sort((a, b) => (Number(b.qtyOnHand) || 0) - (Number(a.qtyOnHand) || 0))
+    : [];
+
   return (
     <div
       style={{
@@ -636,9 +649,44 @@ function LineRow({ line, picked, done, highlighted, qtyInCurrentBin }) {
               {line.description || ""}
             </div>
           )}
-          {highlighted && qtyInCurrentBin != null && (
-            <div style={{ fontSize: 10, color: ACCENT, ...mono, marginTop: 2 }}>
-              {qtyInCurrentBin} in this bin
+          {!done && (highlighted || otherBins.length > 0) && (
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: 4,
+                marginTop: 4,
+              }}
+            >
+              {highlighted && qtyInCurrentBin != null && (
+                <BinChip
+                  bin={{ binNumber: "This bin", qtyOnHand: qtyInCurrentBin }}
+                  current
+                />
+              )}
+              {otherBins.slice(0, 3).map((b, i) => (
+                <BinChip key={`${b.binId}-${i}`} bin={b} preferred={!highlighted && i === 0} />
+              ))}
+              {otherBins.length > 3 && (
+                <span style={{ fontSize: 10, color: "#64748b", alignSelf: "center", ...mono }}>
+                  +{otherBins.length - 3} more
+                </span>
+              )}
+              {!highlighted && otherBins.length === 0 && (
+                <span
+                  style={{
+                    fontSize: 10,
+                    color: "#ef4444",
+                    ...mono,
+                    padding: "2px 8px",
+                    borderRadius: 10,
+                    background: "rgba(239,68,68,0.08)",
+                    border: "1px solid rgba(239,68,68,0.25)",
+                  }}
+                >
+                  No bin stock
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -656,5 +704,51 @@ function LineRow({ line, picked, done, highlighted, qtyInCurrentBin }) {
         </div>
       </div>
     </div>
+  );
+}
+
+// ───────────────────────────────────────────────
+// BinChip — compact bin-location badge shown per line.
+// `current`    = stock in the currently-scanned bin (use accent solid).
+// `preferred`  = first sort candidate (most on-hand) of the remaining bins.
+// ───────────────────────────────────────────────
+function BinChip({ bin, current, preferred }) {
+  const base = {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 4,
+    padding: "2px 8px",
+    borderRadius: 10,
+    fontSize: 10,
+    fontWeight: 600,
+    letterSpacing: 0.2,
+    ...mono,
+  };
+  const style = current
+    ? {
+        ...base,
+        color: "#fff",
+        background: ACCENT,
+        border: `1px solid ${ACCENT}`,
+      }
+    : preferred
+    ? {
+        ...base,
+        color: ACCENT,
+        background: `${ACCENT}15`,
+        border: `1px solid ${ACCENT}50`,
+      }
+    : {
+        ...base,
+        color: "#94a3b8",
+        background: "rgba(148,163,184,0.08)",
+        border: "1px solid rgba(148,163,184,0.2)",
+      };
+  const qty = Number(bin.qtyOnHand) || 0;
+  return (
+    <span style={style}>
+      📍 {bin.binNumber}
+      {qty > 0 && <span style={{ opacity: 0.75 }}>·{qty}</span>}
+    </span>
   );
 }
