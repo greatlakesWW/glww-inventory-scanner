@@ -392,41 +392,100 @@ export default async function handler(req, res) {
     console.error("Failed to persist fulfillmentId to session:", e);
   }
 
-  // ─── STEP 10–11: Build and POST Item Receipt ───
+  // ─── STEP 10: Prepare receipt payload ───
   //
-  // Same shape as the fulfillment: entries for scanned lines (with
-  // inventoryDetail citing the destination bin) plus zero-qty stubs
-  // for other eligible lines (so NS doesn't auto-receive them at
-  // their default qty). The receipt transform's sublist mirrors the
-  // fulfillment we just created.
-  const receiptLines = [];
-  for (const [lid, roll] of Object.entries(lineRoll)) {
-    const meta = lineMeta[lid];
-    if (!meta) continue;
-    const picked = Number(roll.totalQty) || 0;
-    if (picked <= 0) continue;
-    receiptLines.push({
-      orderLine: meta.orderLine,
-      quantity: picked,
-      itemReceive: true,
-      inventoryDetail: {
-        inventoryAssignment: {
-          items: [{ quantity: picked, binNumber: destBinNumber }],
-        },
-      },
+  // Two subtle differences from the fulfillment payload, discovered by
+  // inspecting an existing IR created from a TO 523165 fulfillment:
+  //
+  // 1. Receipt `orderLine` references the FULFILLMENT's own `line` values
+  //    (0, 3, 6...), NOT the source TO's line values. We POST the receipt
+  //    against the fulfillment's transform URL, so "order" here means the
+  //    fulfillment. After creating the IF we GET it back, read its item
+  //    sublist, and map fulfillment.line → itemId (to correlate with our
+  //    picks) and use fulfillment.line as the receipt's orderLine.
+  //
+  // 2. `binNumber` on inventoryAssignment is an OBJECT `{id: "..."}` using
+  //    the bin's internal ID, not a string with the bin's display name.
+  //    We resolve F-01-0001 (or whatever the configured bin name is) to
+  //    its internal ID via SuiteQL.
+
+  // Step 10a — fetch the just-created fulfillment to learn its line structure.
+  let ffLines = [];
+  try {
+    const ffGetUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/itemFulfillment/${fulfillmentId}?expandSubResources=true`;
+    const ffGetResp = await nsGet(ffGetUrl, config);
+    const ffGetData = await readJsonResp(ffGetResp);
+    if (ffGetResp.ok && ffGetData?.item?.items) {
+      ffLines = ffGetData.item.items;
+    } else {
+      console.error("Fulfillment GET failed:", ffGetResp.status, JSON.stringify(ffGetData).slice(0, 400));
+    }
+  } catch (e) {
+    console.error("Fulfillment GET threw:", e.message);
+  }
+
+  // Step 10b — resolve destination bin NAME → internal ID via SuiteQL.
+  let destBinId = null;
+  try {
+    const binQ = `SELECT id, binnumber FROM Bin WHERE binnumber = '${destBinNumber.replace(/'/g, "''")}' FETCH FIRST 1 ROWS ONLY`;
+    const { items: binRows } = await runSuiteQL(binQ);
+    if (binRows && binRows[0]?.id != null) destBinId = String(binRows[0].id);
+  } catch (e) {
+    console.error("Destination bin lookup failed:", e.message);
+  }
+  if (!destBinId) {
+    // Can't proceed without the bin id — mark session stuck so the FF isn't
+    // orphaned silently and an admin can retry once the bin is resolved.
+    try {
+      await writeSession({
+        ...session,
+        fulfillmentId,
+        status: "fulfilled_pending_receipt",
+        updatedAt: new Date().toISOString(),
+      });
+    } catch {}
+    return res.status(207).json({
+      status: "partial_success",
+      fulfillmentId,
+      errorMessage: `Could not resolve destination bin "${destBinNumber}" to an internal ID. Check the bin exists at location ${destinationLocationId}.`,
+      retryUrl: `/api/transfer-orders/${toId}/retry-receipt`,
     });
   }
-  const touchedReceiptLines = new Set(receiptLines.map((l) => Number(l.orderLine)));
-  for (const meta of Object.values(lineMeta)) {
-    if (!meta.orderLine) continue;
-    if (touchedReceiptLines.has(Number(meta.orderLine))) continue;
-    const remaining = meta.quantity - meta.quantityFulfilled;
-    if (remaining <= 0) continue;
-    receiptLines.push({
-      orderLine: meta.orderLine,
-      quantity: 0,
-      itemReceive: false,
+
+  // Step 10c — build receipt payload using the fulfillment's line structure.
+  // Match each IF line to our pick by itemId (both session events and the
+  // fulfillment carry item ids that tie back to the source TO line).
+  const receiptLines = [];
+  for (const ffLine of ffLines) {
+    const ffLineNumber = Number(ffLine.line);
+    const itemId = ffLine.item?.id != null ? String(ffLine.item.id) : null;
+    // Find the session pick for this item. Multiple TO lines COULD share the
+    // same itemId in weird edge cases, but for the GLWW setup each SKU is
+    // a distinct variant so the mapping is 1:1.
+    const matchingLineId = Object.keys(lineRoll).find((lid) => {
+      const meta = lineMeta[lid];
+      return meta && meta.itemId === itemId;
     });
+    const picked = matchingLineId ? Number(lineRoll[matchingLineId].totalQty) || 0 : 0;
+
+    if (picked > 0) {
+      receiptLines.push({
+        orderLine: ffLineNumber,
+        quantity: picked,
+        itemReceive: true,
+        inventoryDetail: {
+          inventoryAssignment: {
+            items: [{ quantity: picked, binNumber: { id: destBinId } }],
+          },
+        },
+      });
+    } else {
+      receiptLines.push({
+        orderLine: ffLineNumber,
+        quantity: 0,
+        itemReceive: false,
+      });
+    }
   }
   const receiptPayload = { item: { items: receiptLines } };
 
@@ -441,7 +500,12 @@ export default async function handler(req, res) {
 
     if (!(rcResp.status === 204 || rcResp.status === 200 || rcResp.status === 201)) {
       // STEP 13: receipt failure. Mark session stuck, log error, return 207.
+      console.error("Item Receipt create failed:", rcResp.status, rcText.slice(0, 600));
+      console.error("Item Receipt request payload:", JSON.stringify(receiptPayload));
+      console.error("Item Receipt fulfillment lines summary:", JSON.stringify(ffLines.map((l) => ({ line: l.line, orderLine: l.orderLine, itemId: l.item?.id, qty: l.quantity }))));
+      console.error("Item Receipt destBinId:", destBinId, "destBinNumber:", destBinNumber);
       const errorMessage =
+        (rcData && typeof rcData === "object" && rcData["o:errorDetails"] && rcData["o:errorDetails"][0]?.detail) ||
         (rcData && typeof rcData === "object" && (rcData.title || rcData.error)) ||
         `NetSuite returned ${rcResp.status}`;
 
