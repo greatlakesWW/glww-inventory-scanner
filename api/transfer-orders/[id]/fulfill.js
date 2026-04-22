@@ -195,23 +195,15 @@ export default async function handler(req, res) {
   }
 
   // ─── Load TO header + lines via REST Record API ───
-  // Need: destinationLocationId, and per-line { orderLine, itemId, quantity,
-  // quantityFulfilled } for eligibility filtering.
+  // Get TO header + line sublist via REST Record API.
   //
-  // IMPORTANT: the REST Record API's `line` field and SuiteQL's
-  // `transactionline.linesequencenumber` are NOT guaranteed to agree,
-  // and the transform's `item` sublist validates `orderLine` against the
-  // SuiteQL view. Production `src/modules/TransferOrders.jsx` reads lines
-  // via SuiteQL and its fulfillment POST works — mirror that exactly.
-  // SuiteQL can query `quantityfulfilled` when scoped to a single
-  // transaction (verified in Session 2's detail endpoint).
-  //
-  // Header (destinationLocationId, tranId) still comes from REST because
-  // that path already works and isn't the source of the error.
-  const toHeaderUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/transferOrder/${toId}?fields=id,tranId,location,transferLocation`;
+  // We can't use SuiteQL here: transactionline.quantityfulfilled is
+  // NOT_EXPOSED to SuiteQL's SEARCH channel in this account (verified
+  // across Sessions 2 and 6). REST Record API returns it natively.
+  const toUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/transferOrder/${toId}?expandSubResources=true`;
   let to;
   try {
-    const toResp = await nsGet(toHeaderUrl, config);
+    const toResp = await nsGet(toUrl, config);
     const toData = await readJsonResp(toResp);
     if (!toResp.ok) {
       return res.status(toResp.status || 500).json({
@@ -233,40 +225,24 @@ export default async function handler(req, res) {
     return res.status(502).json({ error: "TO has no destination location" });
   }
 
-  // Lines via SuiteQL — same query shape as production
-  // src/modules/TransferOrders.jsx. Keyed by internal line id (tl.id) so we
-  // can match session events' lineId; orderLine is tl.linesequencenumber,
-  // which is what the transform's item sublist validates against.
+  // Build lineMeta keyed by `l.line` — the REST Record API's line
+  // identifier. Session events' `lineId` came from Session 2's detail
+  // endpoint, which also reads `l.line` from REST, so they match.
+  // `orderLine` on the fulfillment transform payload uses the same value.
+  const rawLines = Array.isArray(to.item?.items)
+    ? to.item.items
+    : Array.isArray(to.item)
+      ? to.item
+      : [];
   const lineMeta = {};
-  try {
-    const linesQuery = `
-      SELECT tl.id AS line_id,
-             tl.linesequencenumber AS line_number,
-             tl.item AS item_id,
-             tl.quantity AS ordered_qty,
-             tl.quantityfulfilled AS fulfilled_qty
-      FROM transactionline tl
-      WHERE tl.transaction = ${toId}
-        AND tl.mainline = 'F'
-        AND tl.itemtype IN ('InvtPart', 'Assembly', 'Kit')
-        AND (tl.quantity - COALESCE(tl.quantityfulfilled, 0)) > 0
-      ORDER BY tl.linesequencenumber
-    `;
-    const { items } = await runSuiteQL(linesQuery);
-    for (const r of items) {
-      const lid = String(r.line_id);
-      lineMeta[lid] = {
-        orderLine: Number(r.line_number),
-        itemId: r.item_id != null ? String(r.item_id) : null,
-        quantity: Number(r.ordered_qty) || 0,
-        quantityFulfilled: Number(r.fulfilled_qty) || 0,
-      };
-    }
-  } catch (e) {
-    return res.status(e.status || 500).json({
-      error: `Loading TO lines via SuiteQL failed: ${e.message}`,
-      details: e.body || null,
-    });
+  for (const l of rawLines) {
+    if (l?.line == null) continue;
+    lineMeta[String(l.line)] = {
+      orderLine: Number(l.line),
+      itemId: l.item?.id != null ? String(l.item.id) : null,
+      quantity: Number(l.quantity) || 0,
+      quantityFulfilled: Number(l.quantityFulfilled) || 0,
+    };
   }
 
   // Resolve destination bin. Defaults to the hardcoded GLWW map (location 3
@@ -294,45 +270,51 @@ export default async function handler(req, res) {
 
   // ─── Build Item Fulfillment payload ───
   //
-  // NS !transform/itemFulfillment pre-populates the fulfillment's item sublist
-  // with ONLY the remaining-to-ship lines (quantity > quantityFulfilled).
-  // Already-fulfilled lines are NOT in that sublist; referencing them by
-  // orderLine triggers "You are either trying to access a field on a
-  // non-existent line..." (400 USER_ERROR on path item).
+  // Only send entries for lines the picker actually scanned. NS's
+  // !transform/itemFulfillment pre-populates the fulfillment sublist with
+  // every eligible (remaining > 0) line at default qty — we MODIFY those
+  // defaults via `orderLine`. Lines we don't include in the payload retain
+  // their defaults...which would fulfill stock we didn't pick. So we also
+  // override un-picked lines to zero via itemreceive:false.
   //
-  // Production TransferOrders.jsx also does NOT include
-  // inventoryDetail.inventoryAssignment on the fulfillment — NS allocates
-  // source bins from whatever has stock. Trying to hand-pick bins here
-  // also triggers the static-sublist error because the pre-populated
-  // inventoryAssignment is static, not additive.
-  //
-  // Match production: for each ELIGIBLE line (remaining > 0), send
-  //   { orderLine, quantity, itemreceive }
-  // and nothing else. quantity is the amount the picker scanned for that
-  // line; unscanned eligible lines go through as quantity:0 / itemreceive:false
-  // to tell NS "skip this line on this fulfillment."
-  const eligibleLines = Object.values(lineMeta).filter(
-    (m) => m.quantity - m.quantityFulfilled > 0
-  );
-  if (eligibleLines.length === 0) {
-    return res.status(400).json({
-      error: "No remaining lines on this TO — nothing to fulfill",
+  // CRITICAL NOTE FOR DEBUGGING: the prior iteration included zero stubs
+  // for every "remaining" line we computed from the TO, which triggered a
+  // 400 "non-existent line / static sublist" error. The likely cause was
+  // our definition of "remaining" not matching NS's. This iteration sends
+  // stubs for every rawLine whose quantity > quantityFulfilled (exactly
+  // what REST reports), without any additional filtering. If NS still
+  // rejects it, the diagnostic logging below will show us exactly which
+  // orderLine numbers NS considers invalid.
+  const fulfillmentLines = [];
+  // (a) the lines we picked — explicit qty + itemreceive:true
+  for (const [lid, roll] of Object.entries(lineRoll)) {
+    const meta = lineMeta[lid];
+    if (!meta) continue; // skip picks whose line isn't even on the TO anymore
+    fulfillmentLines.push({
+      orderLine: meta.orderLine,
+      quantity: Number(roll.totalQty) || 0,
+      itemreceive: (Number(roll.totalQty) || 0) > 0,
     });
   }
 
-  const fulfillmentLines = eligibleLines.map((meta) => {
-    const lid = String(meta.orderLine);
-    const picked = Number(lineRoll[lid]?.totalQty) || 0;
-    return {
-      orderLine: meta.orderLine,
-      quantity: picked,
-      itemreceive: picked > 0,
-    };
-  });
-
-  if (!fulfillmentLines.some((l) => l.itemreceive)) {
+  if (fulfillmentLines.length === 0) {
     return res.status(400).json({
       error: "No scanned items match remaining lines on this TO",
+    });
+  }
+
+  // (b) stubs for every OTHER eligible line so NS doesn't accidentally
+  // auto-fulfill them at default qty. Skip lines with no meta.orderLine.
+  const touchedLines = new Set(fulfillmentLines.map((l) => Number(l.orderLine)));
+  for (const meta of Object.values(lineMeta)) {
+    if (!meta.orderLine) continue;
+    if (touchedLines.has(Number(meta.orderLine))) continue;
+    const remaining = meta.quantity - meta.quantityFulfilled;
+    if (remaining <= 0) continue; // already fulfilled — transform won't include
+    fulfillmentLines.push({
+      orderLine: meta.orderLine,
+      quantity: 0,
+      itemreceive: false,
     });
   }
 
@@ -349,7 +331,7 @@ export default async function handler(req, res) {
     if (!(ffResp.status === 204 || ffResp.status === 200 || ffResp.status === 201)) {
       console.error("Item Fulfillment create failed:", ffResp.status, ffText.slice(0, 600));
       console.error("Item Fulfillment request payload:", JSON.stringify(fulfillmentPayload));
-      console.error("Item Fulfillment eligibleLines summary:", JSON.stringify(eligibleLines));
+      console.error("Item Fulfillment lineMeta summary:", JSON.stringify(lineMeta));
       console.error("Session lineRoll summary:", JSON.stringify(lineRoll));
       await logFulfillmentError({
         timestamp: new Date().toISOString(),
@@ -400,32 +382,40 @@ export default async function handler(req, res) {
 
   // ─── STEP 10–11: Build and POST Item Receipt ───
   //
-  // Same shape rules as the fulfillment: only reference eligible lines
-  // (the receipt transform mirrors the fulfillment's sublist, which was
-  // filtered to remaining lines). Scanned lines get a per-bin
-  // inventoryDetail citing the destination salesfloor bin; unscanned
-  // eligible lines go through as itemreceive:false so NS knows to skip them.
-  const receiptLines = eligibleLines.map((meta) => {
-    const lid = String(meta.orderLine);
-    const picked = Number(lineRoll[lid]?.totalQty) || 0;
-    if (picked > 0) {
-      return {
-        orderLine: meta.orderLine,
-        quantity: picked,
-        itemreceive: true,
-        inventoryDetail: {
-          inventoryAssignment: {
-            items: [{ quantity: picked, binNumber: destBinNumber }],
-          },
+  // Same shape as the fulfillment: entries for scanned lines (with
+  // inventoryDetail citing the destination bin) plus zero-qty stubs
+  // for other eligible lines (so NS doesn't auto-receive them at
+  // their default qty). The receipt transform's sublist mirrors the
+  // fulfillment we just created.
+  const receiptLines = [];
+  for (const [lid, roll] of Object.entries(lineRoll)) {
+    const meta = lineMeta[lid];
+    if (!meta) continue;
+    const picked = Number(roll.totalQty) || 0;
+    if (picked <= 0) continue;
+    receiptLines.push({
+      orderLine: meta.orderLine,
+      quantity: picked,
+      itemreceive: true,
+      inventoryDetail: {
+        inventoryAssignment: {
+          items: [{ quantity: picked, binNumber: destBinNumber }],
         },
-      };
-    }
-    return {
+      },
+    });
+  }
+  const touchedReceiptLines = new Set(receiptLines.map((l) => Number(l.orderLine)));
+  for (const meta of Object.values(lineMeta)) {
+    if (!meta.orderLine) continue;
+    if (touchedReceiptLines.has(Number(meta.orderLine))) continue;
+    const remaining = meta.quantity - meta.quantityFulfilled;
+    if (remaining <= 0) continue;
+    receiptLines.push({
       orderLine: meta.orderLine,
       quantity: 0,
       itemreceive: false,
-    };
-  });
+    });
+  }
   const receiptPayload = { item: { items: receiptLines } };
 
   const rcUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/itemFulfillment/${fulfillmentId}/!transform/itemReceipt`;
