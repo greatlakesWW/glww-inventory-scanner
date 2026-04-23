@@ -4,7 +4,9 @@ This folder holds SuiteScript 2.x RESTlets the picker app calls when the REST Re
 
 ## Why this exists
 
-Transfer Order receipts can't be created through the standard REST Record API in our account — every transform path (`transferOrder/{id}/!transform/itemReceipt`, `itemFulfillment/{id}/!transform/itemReceipt`, direct `/itemreceipt` POST) returns either "transformation not allowed" or "invalid reference." SuiteScript's `N/record` module has no such restriction, so we use a thin RESTlet as a bridge.
+Transfer Order receipts can't be created through the standard REST Record API in our account — every transform path (`transferOrder/{id}/!transform/itemReceipt`, `itemFulfillment/{id}/!transform/itemReceipt`, direct `/itemreceipt` POST) returns either "transformation not allowed" or "invalid reference." SuiteScript's `N/record` module has exactly **one** working path: `record.transform(TRANSFER_ORDER → ITEM_RECEIPT)`. We proved this via a 15-probe diagnostic matrix (commit 586bab4 → bdc0c1f) that tested every transform direction and every `record.create` defaultValues shape. Everything else is hard-blocked at the account level; features `ADVANCEDRECEIVING` and `INBOUNDSHIPMENT` are **not** the gate (both off, irrelevant).
+
+Precondition for the working path: the source IF must be `shipStatus=C` (Shipped) so the TO enters "Pending Receipt" status. `api/transfer-orders/[id]/fulfill.js` PATCHes shipStatus before calling this RESTlet; if that PATCH fails, the RESTlet throws `INVALID_INITIALIZE_REF`.
 
 ## Files
 
