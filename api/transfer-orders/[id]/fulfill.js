@@ -272,41 +272,42 @@ export default async function handler(req, res) {
   }
   const destBinNumber = String(salesfloorMap[destinationLocationId]);
 
-  // Note: we previously resolved session binId → binNumber via inventorybalance
-  // so we could hand-pick source bins on the Item Fulfillment. That got
-  // rejected by NetSuite with USER_ERROR on the item sublist (the transform's
-  // inventoryAssignment is static). Production TransferOrders.jsx also omits
-  // inventoryDetail on the fulfillment and lets NetSuite auto-allocate source
-  // bins, which is what we now do too. The session still records which bins
-  // the picker physically pulled from (event log in KV) for audit purposes.
-
-  // ─── Build Item Fulfillment payload ───
+  // Build Item Fulfillment payload.
   //
-  // Only send entries for lines the picker actually scanned. NS's
-  // !transform/itemFulfillment pre-populates the fulfillment sublist with
-  // every eligible (remaining > 0) line at default qty — we MODIFY those
-  // defaults via `orderLine`. Lines we don't include in the payload retain
-  // their defaults...which would fulfill stock we didn't pick. So we also
-  // override un-picked lines to zero via itemReceive:false.
+  // Bin-managed items at a bin-managed source location require explicit
+  // `inventoryDetail.inventoryAssignment` per line — NS won't auto-pick
+  // a bin if multiple could match, and fails with
+  // "Please configure the inventory detail in line N" otherwise.
+  // We already have every picked bin in `roll.binCounts` from the
+  // session event log, so we emit one assignment per bin.
   //
-  // CRITICAL NOTE FOR DEBUGGING: the prior iteration included zero stubs
-  // for every "remaining" line we computed from the TO, which triggered a
-  // 400 "non-existent line / static sublist" error. The likely cause was
-  // our definition of "remaining" not matching NS's. This iteration sends
-  // stubs for every rawLine whose quantity > quantityFulfilled (exactly
-  // what REST reports), without any additional filtering. If NS still
-  // rejects it, the diagnostic logging below will show us exactly which
-  // orderLine numbers NS considers invalid.
+  // CRITICAL: `binNumber` must be an object `{id: "..."}`, not a string.
+  // An earlier iteration sent the bin NAME as a raw string and NS
+  // rejected the entire sublist as "static" (commit a8ac8b1). Sending
+  // the bin internal id as an object is the documented shape.
   const fulfillmentLines = [];
-  // (a) the lines we picked — explicit qty + itemReceive:true
   for (const [lid, roll] of Object.entries(lineRoll)) {
     const meta = lineMeta[lid];
     if (!meta) continue; // skip picks whose line isn't even on the TO anymore
-    fulfillmentLines.push({
+    const totalQty = Number(roll.totalQty) || 0;
+    if (totalQty <= 0) continue;
+
+    const assignments = Object.entries(roll.binCounts)
+      .filter(([bid, q]) => bid && Number(q) > 0)
+      .map(([bid, q]) => ({
+        binNumber: { id: String(bid) },
+        quantity: Number(q),
+      }));
+
+    const entry = {
       orderLine: meta.orderLine,
-      quantity: Number(roll.totalQty) || 0,
-      itemReceive: (Number(roll.totalQty) || 0) > 0,
-    });
+      quantity: totalQty,
+      itemReceive: true,
+    };
+    if (assignments.length > 0) {
+      entry.inventoryDetail = { inventoryAssignment: { items: assignments } };
+    }
+    fulfillmentLines.push(entry);
   }
 
   if (fulfillmentLines.length === 0) {
