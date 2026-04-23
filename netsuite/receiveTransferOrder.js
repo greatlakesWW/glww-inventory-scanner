@@ -2,120 +2,197 @@
  * @NApiVersion 2.1
  * @NScriptType Restlet
  *
- * receiveTransferOrder — RESTlet companion to the Pick Mode fulfill
- * endpoint (api/transfer-orders/[id]/fulfill.js).
- *
- * The picker app creates the Item Fulfillment via the standard REST
- * Record API `!transform/itemFulfillment` path (which works). It then
- * calls this RESTlet to create the matching Item Receipt. This split
- * exists because the REST `!transform/itemReceipt` path is blocked in
- * our NS account configuration ("invalid reference") — SuiteScript's
- * record.transform() does not have that limitation.
+ * receiveTransferOrder — creates an Item Receipt against a TO via
+ * SuiteScript after the picker app has already shipped an Item
+ * Fulfillment. We keep this RESTlet because every REST Record API
+ * variant for creating a TO Item Receipt is rejected in this account:
+ *   - POST transferOrder/{id}/!transform/itemReceipt     → "invalid reference {id}"
+ *   - POST itemFulfillment/{id}/!transform/itemReceipt   → "transformation not allowed"
+ *   - POST itemreceipt directly with createdFrom         → asks for [entity]
  *
  * ─── Request body ────────────────────────────────────────────
  * {
- *   "fulfillmentId":   "526977",        // required, string id of the IF
- *   "transferOrderId": "523165",        // informational, audited in logs
- *   "destBinId":       "123",            // required, bin internal id
- *   "lines": [                           // required, 1+ entries
- *     { "orderLine": 48, "quantity": 1 },
- *     { "orderLine": 66, "quantity": 1 }
- *   ]
+ *   "fulfillmentId":   "526977",
+ *   "transferOrderId": "523165",
+ *   "destBinId":       "123",
+ *   "lines": [ { "orderLine": 0, "quantity": 1 }, ... ],
+ *   "diagnose":         true   // optional — return the probe matrix
+ *                              // without saving anything
  * }
- *
- * The receipt is transformed from the Item Fulfillment (not the
- * source TO). SuiteScript's TRANSFER_ORDER → ITEM_RECEIPT transform
- * is rejected with INVALID_INITIALIZE_REF; ITEM_FULFILLMENT →
- * ITEM_RECEIPT works as intended.
- *
- * `orderLine` values should match each picked line in the IF's item
- * sublist (IF's own `line` field). The caller (fulfill.js) knows these
- * from its POST response; retry-receipt.js reconstructs them from REST
- * `l.line + 2` (receive-side sub-row per NS's 3-rows-per-item layout).
  *
  * ─── Response ────────────────────────────────────────────────
- * On success (200):
- * {
- *   "status": "created",
- *   "receiptId": "530000",
- *   "transferOrderId": "523165"
- * }
+ * On success: { status: "created", receiptId, strategy, linesReceived }
+ * `strategy` names which construction path worked so the next caller
+ * can skip the probe matrix.
  *
- * On error, SuiteScript returns a 500 with the thrown error message.
- * The caller should treat any non-200 as a receipt failure and mark
- * the session `fulfilled_pending_receipt`.
+ * On failure: 500 with a `probe` array documenting every path tried and
+ * the exact error each one returned. That report is the authoritative
+ * answer to "is there any way to create this IR programmatically."
  */
-define(['N/record', 'N/log'], function (record, log) {
-  function doPost(body) {
-    log.audit({ title: 'receiveTransferOrder.request', details: body });
+define(['N/record', 'N/search', 'N/runtime', 'N/log'], function (record, search, runtime, log) {
 
-    // ─── Validate inputs ───
-    var fulfillmentId = body && body.fulfillmentId ? String(body.fulfillmentId) : '';
-    var toId = body && body.transferOrderId ? String(body.transferOrderId) : '';
-    var destBinId = body && body.destBinId ? String(body.destBinId) : '';
-    var lines = body && Array.isArray(body.lines) ? body.lines : [];
+  // ─── Diagnostics ───────────────────────────────────────────────
+  // Pull the state NS will consult when deciding whether to allow a
+  // TO-receipt transform. Runs in-RESTlet because `getPermission` /
+  // runtime.getCurrentScript() are not exposed to REST consumers.
+  function collectDiagnostics(fulfillmentId, toId) {
+    var d = { fulfillment: {}, transferOrder: {}, role: {}, features: {}, errors: [] };
 
-    if (!fulfillmentId) { throw Error('fulfillmentId is required'); }
-    if (!destBinId) { throw Error('destBinId is required'); }
-    if (lines.length === 0) { throw Error('lines[] must be non-empty'); }
+    try {
+      var ffLookup = search.lookupFields({
+        type: record.Type.ITEM_FULFILLMENT,
+        id: fulfillmentId,
+        columns: ['shipstatus', 'status', 'createdfrom', 'trandate', 'postingperiod'],
+      });
+      d.fulfillment = ffLookup;
+    } catch (e) { d.errors.push('ffLookup: ' + e.message); }
 
-    // Map orderLine → quantity so we can look up as we walk the receipt sublist
-    var qtyByOrderLine = {};
-    for (var li = 0; li < lines.length; li++) {
-      var l = lines[li];
-      var ol = String(l.orderLine);
-      var qty = Number(l.quantity) || 0;
-      if (qty > 0) { qtyByOrderLine[ol] = qty; }
-    }
+    try {
+      var toLookup = search.lookupFields({
+        type: record.Type.TRANSFER_ORDER,
+        id: toId,
+        columns: ['status', 'statusref', 'location', 'transferlocation', 'trandate'],
+      });
+      d.transferOrder = toLookup;
+    } catch (e) { d.errors.push('toLookup: ' + e.message); }
 
-    // ─── Create IR with createdfrom set ───
-    // This account's config blocks record.transform() for both
-    // TRANSFER_ORDER → ITEM_RECEIPT (INVALID_INITIALIZE_REF) and
-    // ITEM_FULFILLMENT → ITEM_RECEIPT (INVALID_RCRD_TRANSFRM).
-    //
-    // Workaround: create a blank ITEM_RECEIPT with defaultValues
-    // pointing at the source document. NetSuite will auto-source the
-    // line sublist from that source. Try several key names because the
-    // exact default key for TO receipts is undocumented — we log which
-    // one worked so future maintainers know.
-    var receipt = null;
-    var lastCreateError = null;
-    var attemptKeys = [
-      { transaction: fulfillmentId },
-      { order: fulfillmentId },
-      { createdfrom: fulfillmentId },
-      { transaction: toId },
-      { order: toId },
-      { createdfrom: toId },
-    ];
-    for (var k = 0; k < attemptKeys.length; k++) {
+    try {
+      var u = runtime.getCurrentUser();
+      d.role = {
+        roleId: u.role,
+        roleName: u.roleCenter,
+        userName: u.name,
+        subsidiary: u.subsidiary,
+        itemReceiptPerm: u.getPermission({ name: 'TRAN_ITEMRCPT' }),
+        transferOrderPerm: u.getPermission({ name: 'TRAN_TRNFRORD' }),
+        itemFulfillmentPerm: u.getPermission({ name: 'TRAN_ITEMSHIP' }),
+      };
+    } catch (e) { d.errors.push('runtimeUser: ' + e.message); }
+
+    try {
+      d.features.advancedBinSerial = runtime.isFeatureInEffect({ feature: 'ADVBINSERIALMGMT' });
+      d.features.multiLocInv        = runtime.isFeatureInEffect({ feature: 'MULTILOCINVT' });
+      d.features.bins               = runtime.isFeatureInEffect({ feature: 'BINMANAGEMENT' });
+      d.features.inboundShipment    = runtime.isFeatureInEffect({ feature: 'INBOUNDSHIPMENT' });
+      d.features.advancedReceiving  = runtime.isFeatureInEffect({ feature: 'ADVANCEDRECEIVING' });
+    } catch (e) { d.errors.push('features: ' + e.message); }
+
+    return d;
+  }
+
+  // ─── Probe matrix ──────────────────────────────────────────────
+  // Each probe returns { name, ok, recordObj?, error? } so we can see
+  // which paths NS actually allows vs which it rejects and why.
+  function runProbes(fulfillmentId, toId) {
+    var probes = [];
+
+    function probe(name, fn) {
       try {
-        receipt = record.create({
-          type: record.Type.ITEM_RECEIPT,
-          isDynamic: true,
-          defaultValues: attemptKeys[k],
+        var recordObj = fn();
+        probes.push({ name: name, ok: true, recordObjPresent: !!recordObj });
+        return recordObj;
+      } catch (e) {
+        probes.push({
+          name: name,
+          ok: false,
+          error: e.message || String(e),
+          name_: e.name,
+          id: e.id,
         });
-        log.audit({ title: 'receiveTransferOrder.createWorked', details: attemptKeys[k] });
-        break;
-      } catch (err) {
-        lastCreateError = err;
-        log.debug({ title: 'receiveTransferOrder.createAttemptFailed', details: { tried: attemptKeys[k], msg: err.message } });
+        return null;
       }
     }
-    if (!receipt) {
-      throw Error('All record.create attempts for ITEM_RECEIPT failed. Last error: ' + (lastCreateError && lastCreateError.message));
+
+    // A. record.transform variations — the canonical path
+    probe('transform:IF->IR:dyn', function () {
+      return record.transform({
+        fromType: record.Type.ITEM_FULFILLMENT,
+        fromId: fulfillmentId,
+        toType: record.Type.ITEM_RECEIPT,
+        isDynamic: true,
+      });
+    });
+
+    probe('transform:IF->IR:static', function () {
+      return record.transform({
+        fromType: record.Type.ITEM_FULFILLMENT,
+        fromId: fulfillmentId,
+        toType: record.Type.ITEM_RECEIPT,
+        isDynamic: false,
+      });
+    });
+
+    probe('transform:IF->IR:dyn+defaults', function () {
+      return record.transform({
+        fromType: record.Type.ITEM_FULFILLMENT,
+        fromId: fulfillmentId,
+        toType: record.Type.ITEM_RECEIPT,
+        isDynamic: true,
+        defaultValues: { recordmode: 'receipt' },
+      });
+    });
+
+    probe('transform:TO->IR:dyn', function () {
+      return record.transform({
+        fromType: record.Type.TRANSFER_ORDER,
+        fromId: toId,
+        toType: record.Type.ITEM_RECEIPT,
+        isDynamic: true,
+      });
+    });
+
+    probe('transform:TO->IR:dyn+ifhint', function () {
+      return record.transform({
+        fromType: record.Type.TRANSFER_ORDER,
+        fromId: toId,
+        toType: record.Type.ITEM_RECEIPT,
+        isDynamic: true,
+        defaultValues: { itemfulfillment: fulfillmentId },
+      });
+    });
+
+    probe('transform:TO->IR:dyn+createdfrom', function () {
+      return record.transform({
+        fromType: record.Type.TRANSFER_ORDER,
+        fromId: toId,
+        toType: record.Type.ITEM_RECEIPT,
+        isDynamic: true,
+        defaultValues: { createdfrom: fulfillmentId },
+      });
+    });
+
+    // B. record.create variations
+    var createKeys = [
+      { transferorder: fulfillmentId },
+      { transferorder: toId },
+      { itemfulfillment: fulfillmentId },
+      { fromtransaction: fulfillmentId },
+      { fromtransaction: toId },
+      { sourcerecord: fulfillmentId },
+      { sourcerecord: toId },
+      { createdfrom: fulfillmentId, recordmode: 'receipt' },
+      { transaction: fulfillmentId, recordmode: 'receipt' },
+    ];
+    for (var i = 0; i < createKeys.length; i++) {
+      (function (dv, label) {
+        probe('create:IR:' + label, function () {
+          return record.create({
+            type: record.Type.ITEM_RECEIPT,
+            isDynamic: true,
+            defaultValues: dv,
+          });
+        });
+      })(createKeys[i], JSON.stringify(createKeys[i]));
     }
 
-    // ─── Walk the sublist ───
-    // The pre-populated sublist contains one line per in-transit TO line.
-    // For lines the picker fulfilled (matched by orderLine): set itemreceive=true,
-    // set quantity, and override the inventoryDetail to land stock into the
-    // configured destination bin.
-    // For other lines: set itemreceive=false (skip this receipt).
-    var lineCount = receipt.getLineCount({ sublistId: 'item' });
-    log.audit({ title: 'receiveTransferOrder.sublistSize', details: lineCount });
+    return probes;
+  }
 
+  // ─── Actually save a receipt once we have a viable record object ─
+  function populateAndSave(receipt, qtyByOrderLine, destBinId) {
+    var lineCount = receipt.getLineCount({ sublistId: 'item' });
     var touched = 0;
+
     for (var i = 0; i < lineCount; i++) {
       receipt.selectLine({ sublistId: 'item', line: i });
       var orderLine = receipt.getCurrentSublistValue({ sublistId: 'item', fieldId: 'orderline' });
@@ -125,30 +202,17 @@ define(['N/record', 'N/log'], function (record, log) {
         receipt.setCurrentSublistValue({ sublistId: 'item', fieldId: 'itemreceive', value: true });
         receipt.setCurrentSublistValue({ sublistId: 'item', fieldId: 'quantity', value: qty });
 
-        // Bin assignment lives in an inventoryDetail SUBRECORD per line.
         var invDetail = receipt.getCurrentSublistSubrecord({
           sublistId: 'item',
           fieldId: 'inventorydetail',
         });
-
-        // Remove pre-populated assignments so NS uses only ours.
-        var existingCount = invDetail.getLineCount({ sublistId: 'inventoryassignment' });
-        for (var j = existingCount - 1; j >= 0; j--) {
+        var existing = invDetail.getLineCount({ sublistId: 'inventoryassignment' });
+        for (var j = existing - 1; j >= 0; j--) {
           invDetail.removeLine({ sublistId: 'inventoryassignment', line: j });
         }
-
-        // Add our single assignment for the configured destination bin.
         invDetail.selectNewLine({ sublistId: 'inventoryassignment' });
-        invDetail.setCurrentSublistValue({
-          sublistId: 'inventoryassignment',
-          fieldId: 'binnumber',
-          value: destBinId,
-        });
-        invDetail.setCurrentSublistValue({
-          sublistId: 'inventoryassignment',
-          fieldId: 'quantity',
-          value: qty,
-        });
+        invDetail.setCurrentSublistValue({ sublistId: 'inventoryassignment', fieldId: 'binnumber', value: destBinId });
+        invDetail.setCurrentSublistValue({ sublistId: 'inventoryassignment', fieldId: 'quantity', value: qty });
         invDetail.commitLine({ sublistId: 'inventoryassignment' });
 
         touched++;
@@ -160,29 +224,120 @@ define(['N/record', 'N/log'], function (record, log) {
     }
 
     if (touched === 0) {
-      throw Error(
-        'No receipt lines were matched. Passed orderLine values did not match any line in the ' +
-        'transformed Item Receipt sublist. Expected one of: ' + Object.keys(qtyByOrderLine).join(', ')
-      );
+      throw Error('No receipt lines matched. Expected orderLine one of: ' + Object.keys(qtyByOrderLine).join(', '));
     }
 
-    // ─── Save ───
-    var receiptId = receipt.save({
-      enableSourcing: true,
-      ignoreMandatoryFields: false,
-    });
+    var receiptId = receipt.save({ enableSourcing: true, ignoreMandatoryFields: false });
+    return { receiptId: String(receiptId), touched: touched };
+  }
 
-    log.audit({
-      title: 'receiveTransferOrder.created',
-      details: { receiptId: receiptId, transferOrderId: toId, touched: touched },
-    });
+  function doPost(body) {
+    log.audit({ title: 'receiveTransferOrder.request', details: body });
 
-    return {
-      status: 'created',
-      receiptId: String(receiptId),
-      transferOrderId: toId,
-      linesReceived: touched,
-    };
+    var fulfillmentId = body && body.fulfillmentId ? String(body.fulfillmentId) : '';
+    var toId = body && body.transferOrderId ? String(body.transferOrderId) : '';
+    var destBinId = body && body.destBinId ? String(body.destBinId) : '';
+    var lines = body && Array.isArray(body.lines) ? body.lines : [];
+    var diagnose = !!(body && body.diagnose);
+
+    if (!fulfillmentId) { throw Error('fulfillmentId is required'); }
+    if (!toId) { throw Error('transferOrderId is required'); }
+    if (!diagnose && !destBinId) { throw Error('destBinId is required'); }
+    if (!diagnose && lines.length === 0) { throw Error('lines[] must be non-empty'); }
+
+    var diagnostics = collectDiagnostics(fulfillmentId, toId);
+    log.audit({ title: 'receiveTransferOrder.diagnostics', details: diagnostics });
+
+    var probes = runProbes(fulfillmentId, toId);
+    log.audit({ title: 'receiveTransferOrder.probes', details: probes });
+
+    // Diagnostic-only mode: don't save, return the full report.
+    if (diagnose) {
+      return {
+        status: 'diagnose',
+        transferOrderId: toId,
+        fulfillmentId: fulfillmentId,
+        diagnostics: diagnostics,
+        probes: probes,
+      };
+    }
+
+    // Find the first probe that produced a record and try to save.
+    // Re-run the winning probe to get a fresh record object (probes
+    // throw them away) and then walk the sublist and save.
+    var qtyByOrderLine = {};
+    for (var li = 0; li < lines.length; li++) {
+      var qty = Number(lines[li].quantity) || 0;
+      if (qty > 0) { qtyByOrderLine[String(lines[li].orderLine)] = qty; }
+    }
+
+    var strategy = null;
+    var receipt = null;
+    var saveError = null;
+
+    var winningProbes = [];
+    for (var p = 0; p < probes.length; p++) {
+      if (probes[p].ok) winningProbes.push(probes[p].name);
+    }
+    log.audit({ title: 'receiveTransferOrder.winners', details: winningProbes });
+
+    for (var w = 0; w < winningProbes.length && !strategy; w++) {
+      var name = winningProbes[w];
+      try {
+        receipt = rebuildByName(name, fulfillmentId, toId);
+        if (receipt) {
+          var result = populateAndSave(receipt, qtyByOrderLine, destBinId);
+          log.audit({ title: 'receiveTransferOrder.created', details: { strategy: name, receiptId: result.receiptId } });
+          return {
+            status: 'created',
+            strategy: name,
+            receiptId: result.receiptId,
+            linesReceived: result.touched,
+            transferOrderId: toId,
+          };
+        }
+      } catch (e) {
+        saveError = { strategy: name, message: e.message };
+        log.error({ title: 'receiveTransferOrder.saveFailed', details: saveError });
+      }
+    }
+
+    // Nothing worked. Throw a rich error that includes the probe report
+    // so the caller can log it and tell support exactly what NS said.
+    throw Error(JSON.stringify({
+      message: 'No receipt construction path succeeded',
+      diagnostics: diagnostics,
+      probes: probes,
+      saveError: saveError,
+    }));
+  }
+
+  // Re-run a probe by name so we get a fresh record to save.
+  function rebuildByName(name, fulfillmentId, toId) {
+    if (name === 'transform:IF->IR:dyn') {
+      return record.transform({ fromType: record.Type.ITEM_FULFILLMENT, fromId: fulfillmentId, toType: record.Type.ITEM_RECEIPT, isDynamic: true });
+    }
+    if (name === 'transform:IF->IR:static') {
+      return record.transform({ fromType: record.Type.ITEM_FULFILLMENT, fromId: fulfillmentId, toType: record.Type.ITEM_RECEIPT, isDynamic: false });
+    }
+    if (name === 'transform:IF->IR:dyn+defaults') {
+      return record.transform({ fromType: record.Type.ITEM_FULFILLMENT, fromId: fulfillmentId, toType: record.Type.ITEM_RECEIPT, isDynamic: true, defaultValues: { recordmode: 'receipt' } });
+    }
+    if (name === 'transform:TO->IR:dyn') {
+      return record.transform({ fromType: record.Type.TRANSFER_ORDER, fromId: toId, toType: record.Type.ITEM_RECEIPT, isDynamic: true });
+    }
+    if (name === 'transform:TO->IR:dyn+ifhint') {
+      return record.transform({ fromType: record.Type.TRANSFER_ORDER, fromId: toId, toType: record.Type.ITEM_RECEIPT, isDynamic: true, defaultValues: { itemfulfillment: fulfillmentId } });
+    }
+    if (name === 'transform:TO->IR:dyn+createdfrom') {
+      return record.transform({ fromType: record.Type.TRANSFER_ORDER, fromId: toId, toType: record.Type.ITEM_RECEIPT, isDynamic: true, defaultValues: { createdfrom: fulfillmentId } });
+    }
+    var m = /^create:IR:(.+)$/.exec(name);
+    if (m) {
+      var dv = JSON.parse(m[1]);
+      return record.create({ type: record.Type.ITEM_RECEIPT, isDynamic: true, defaultValues: dv });
+    }
+    return null;
   }
 
   return {
