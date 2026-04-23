@@ -247,10 +247,23 @@ export default function PickScreen({ to, onBack }) {
   useScanRefocus(itemScanRef, phase === "active" && !!currentBin);
 
   // ─── Small presentational helpers ───
+  // Pick list is ordered to match the physical walk through the warehouse:
+  // each line's primary key is its lowest-numbered bin (server returns
+  // binAvailability pre-sorted ASC, so index 0 is the lowest). Bin names
+  // are zero-padded — e.g. `L-02-0004`, `L-03-0014`, `F-01-0001` — so a
+  // straight string compare produces the correct walking order.
+  //
+  // Secondary buckets: done lines sink to the bottom; when a specific
+  // bin is scanned, lines in that bin float to the top of the remaining
+  // set so the picker can clear the bin before moving on.
   const sortedLines = useMemo(() => {
     if (!detail?.lines) return [];
     const binKey = currentBin?.binNumber ? currentBin.binNumber.toUpperCase() : null;
     const linesInBin = binKey ? lookups.binPlan[binKey] : null;
+    const primaryBin = (line) => {
+      const first = line.binAvailability?.[0]?.binNumber;
+      return first ? String(first).toUpperCase() : "\uffff"; // lines with no bin go last
+    };
     const clone = [...detail.lines];
     clone.sort((a, b) => {
       const rA = Number(a.qtyRemaining) || 0;
@@ -263,6 +276,9 @@ export default function PickScreen({ to, onBack }) {
         const inB = linesInBin.has(String(b.lineId));
         if (inA !== inB) return inA ? -1 : 1;
       }
+      const pA = primaryBin(a);
+      const pB = primaryBin(b);
+      if (pA !== pB) return pA < pB ? -1 : 1;
       return Number(a.lineNumber || 0) - Number(b.lineNumber || 0);
     });
     return clone;
