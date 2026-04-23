@@ -64,14 +64,6 @@ async function readJsonResp(resp) {
   }
 }
 
-// Extract the numeric record id from NetSuite's Location header.
-// Example: "https://acct.suitetalk.api.netsuite.com/services/rest/record/v1/itemFulfillment/54321"
-function extractRecordId(locationHeader) {
-  if (!locationHeader) return null;
-  const m = String(locationHeader).match(/\/(\d+)(?:[?#].*)?$/);
-  return m ? m[1] : null;
-}
-
 async function nsGet(url, config) {
   // OAuth 1.0a signed GET. queryParams must be the parsed version of
   // whatever's after '?'; see api/record.js for the established pattern.
@@ -87,20 +79,6 @@ async function nsGet(url, config) {
   const resp = await fetch(url, {
     method: "GET",
     headers: { Authorization: authHeader },
-  });
-  return resp;
-}
-
-async function nsPost(url, body, config) {
-  // For POST with no query string (the transform endpoints), queryParams is {}.
-  const authHeader = generateOAuthHeader("POST", url, {}, config);
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: authHeader,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
   });
   return resp;
 }
@@ -272,115 +250,99 @@ export default async function handler(req, res) {
   }
   const destBinNumber = String(salesfloorMap[destinationLocationId]);
 
-  // Build Item Fulfillment payload.
+  // ─── STEP 7: Create Item Fulfillment via RESTlet ───
   //
-  // Bin-managed items at a bin-managed source location require explicit
-  // `inventoryDetail.inventoryAssignment` per line — NS won't auto-pick
-  // a bin if multiple could match, and fails with
-  // "Please configure the inventory detail in line N" otherwise.
-  // We already have every picked bin in `roll.binCounts` from the
-  // session event log, so we emit one assignment per bin.
-  //
-  // CRITICAL: `binNumber` must be an object `{id: "..."}`, not a string.
-  // An earlier iteration sent the bin NAME as a raw string and NS
-  // rejected the entire sublist as "static" (commit a8ac8b1). Sending
-  // the bin internal id as an object is the documented shape.
-  const fulfillmentLines = [];
+  // We used to POST `!transform/itemFulfillment` via the REST Record API,
+  // but NS treats the pre-populated inventoryDetail as static and either
+  // ignores our override or sums our qty with its auto-allocation,
+  // producing "total inventory detail quantity must be N" errors. The
+  // RESTlet uses SuiteScript's dynamic record API (select-line /
+  // commit-line) which can remove the pre-populated assignments before
+  // adding ours, and can set shipstatus=C in the same save so the TO
+  // flips to "Pending Receipt" for the subsequent TO→IR transform.
+  const restletUrl = process.env.NS_RESTLET_RECEIVE_TO_URL;
+  if (!restletUrl) {
+    return res.status(500).json({
+      error: "NS_RESTLET_RECEIVE_TO_URL is not configured. See netsuite/README.md.",
+    });
+  }
+
+  function signRestletAuth() {
+    const [base, qs] = restletUrl.split("?");
+    const qp = {};
+    if (qs) {
+      for (const pair of qs.split("&")) {
+        const [k, ...rest] = pair.split("=");
+        if (k) qp[decodeURIComponent(k)] = decodeURIComponent(rest.join("="));
+      }
+    }
+    return { base, auth: generateOAuthHeader("POST", base, qp, config) };
+  }
+
+  const fulfillLines = [];
   for (const [lid, roll] of Object.entries(lineRoll)) {
     const meta = lineMeta[lid];
-    if (!meta) continue; // skip picks whose line isn't even on the TO anymore
-    const totalQty = Number(roll.totalQty) || 0;
-    if (totalQty <= 0) continue;
-
-    const assignments = Object.entries(roll.binCounts)
+    if (!meta?.itemId) continue;
+    const bins = Object.entries(roll.binCounts)
       .filter(([bid, q]) => bid && Number(q) > 0)
-      .map(([bid, q]) => ({
-        binNumber: { id: String(bid) },
-        quantity: Number(q),
-      }));
-
-    const entry = {
-      orderLine: meta.orderLine,
-      quantity: totalQty,
-      itemReceive: true,
-    };
-    if (assignments.length > 0) {
-      entry.inventoryDetail = { inventoryAssignment: { items: assignments } };
-    }
-    fulfillmentLines.push(entry);
+      .map(([bid, q]) => ({ binId: String(bid), quantity: Number(q) }));
+    if (bins.length === 0) continue;
+    fulfillLines.push({ itemId: String(meta.itemId), bins });
+  }
+  if (fulfillLines.length === 0) {
+    return res.status(400).json({ error: "No scanned items match remaining lines on this TO" });
   }
 
-  if (fulfillmentLines.length === 0) {
-    return res.status(400).json({
-      error: "No scanned items match remaining lines on this TO",
-    });
-  }
+  const fulfillBody = {
+    transferOrderId: String(toId),
+    action: "fulfill",
+    lines: fulfillLines,
+  };
 
-  // (b) stubs for every OTHER eligible line so NS doesn't accidentally
-  // auto-fulfill them at default qty. Skip lines with no meta.orderLine.
-  const touchedLines = new Set(fulfillmentLines.map((l) => Number(l.orderLine)));
-  for (const meta of Object.values(lineMeta)) {
-    if (!meta.orderLine) continue;
-    if (touchedLines.has(Number(meta.orderLine))) continue;
-    const remaining = meta.quantity - meta.quantityFulfilled;
-    if (remaining <= 0) continue; // already fulfilled — transform won't include
-    fulfillmentLines.push({
-      orderLine: meta.orderLine,
-      quantity: 0,
-      itemReceive: false,
-    });
-  }
-
-  const fulfillmentPayload = { item: { items: fulfillmentLines } };
-
-  // ─── STEP 7: POST Item Fulfillment ───
-  const ffUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/transferOrder/${toId}/!transform/itemFulfillment`;
   let fulfillmentId = null;
   try {
-    const ffResp = await nsPost(ffUrl, fulfillmentPayload, config);
+    const { base: ffBase, auth: ffAuth } = signRestletAuth();
+    const ffResp = await fetch(restletUrl, {
+      method: "POST",
+      headers: { Authorization: ffAuth, "Content-Type": "application/json" },
+      body: JSON.stringify(fulfillBody),
+    });
     const ffText = await ffResp.text();
     let ffData = null;
     if (ffText) { try { ffData = JSON.parse(ffText); } catch { ffData = ffText; } }
-    if (!(ffResp.status === 204 || ffResp.status === 200 || ffResp.status === 201)) {
-      console.error("Item Fulfillment create failed:", ffResp.status, ffText.slice(0, 600));
-      console.error("Item Fulfillment request payload:", JSON.stringify(fulfillmentPayload));
-      console.error("Item Fulfillment lineMeta summary:", JSON.stringify(lineMeta));
-      console.error("Session lineRoll summary:", JSON.stringify(lineRoll));
+
+    if (!ffResp.ok || !ffData?.fulfillmentId) {
+      console.error("RESTlet fulfill failed:", ffResp.status, ffText.slice(0, 800));
+      console.error("RESTlet fulfill payload:", JSON.stringify(fulfillBody));
       await logFulfillmentError({
         timestamp: new Date().toISOString(),
         toId: String(toId),
         tranId: to.tranId || null,
         sessionId: session.sessionId,
         pickerName: session.pickerName || null,
-        step: "item_fulfillment",
+        step: "item_fulfillment_restlet",
         fulfillmentId: null,
         netsuite: {
           status: ffResp.status,
           statusText: ffResp.statusText || "",
-          url: ffUrl,
+          url: ffBase,
           body: ffData,
         },
-        requestPayload: fulfillmentPayload,
+        requestPayload: fulfillBody,
       });
       return res.status(ffResp.status || 500).json({
-        error: `Item Fulfillment create failed (NS ${ffResp.status})`,
+        error: "Item Fulfillment create failed",
         details: ffData,
       });
     }
-    fulfillmentId = extractRecordId(ffResp.headers.get("Location"));
-    if (!fulfillmentId) {
-      return res.status(502).json({
-        error: "Item Fulfillment created but Location header missing fulfillment id",
-      });
-    }
+    fulfillmentId = String(ffData.fulfillmentId);
   } catch (e) {
-    return res.status(500).json({ error: `Item Fulfillment POST failed: ${e.message}` });
+    return res.status(500).json({ error: `RESTlet fulfill threw: ${e.message}` });
   }
 
-  // ─── STEP 9: PERSIST fulfillmentId before attempting receipt ───
-  // Safety wire. Without this, a crash between fulfillment create and
-  // receipt create leaves an orphan fulfillment with no way for Session 7
-  // to recover it.
+  // ─── STEP 8: Persist fulfillmentId before attempting receipt ───
+  // Safety wire. Without this, a crash between fulfillment and receipt
+  // leaves an orphan IF with no way for retry-receipt to find it.
   try {
     await writeSession({
       ...session,
@@ -388,90 +350,10 @@ export default async function handler(req, res) {
       updatedAt: new Date().toISOString(),
     });
   } catch (e) {
-    // Session write failed — log and continue. Worst case the retry-receipt
-    // path will have to discover the fulfillment ID from NetSuite manually.
     console.error("Failed to persist fulfillmentId to session:", e);
   }
 
-  // ─── STEP 9b: Advance IF to "Shipped" status (shipStatus=C) ───
-  //
-  // The standard REST transform `!transform/itemFulfillment` leaves the
-  // new IF in shipStatus "A" (Picked). The TO cannot be received via
-  // record.transform(TO→IR) until every linked IF is shipStatus "C"
-  // (Shipped) — at that point the TO flips to "Pending Receipt" and
-  // transform-from-TO is allowed. If the PATCH fails silently, the TO
-  // stays "Partially Fulfilled" and the RESTlet below throws
-  // INVALID_INITIALIZE_REF. So this step is a hard gate: bail into
-  // fulfilled_pending_receipt immediately if it fails, instead of
-  // letting the picker see a confusing downstream error.
-  let shipStatusSet = false;
-  try {
-    const patchUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/itemFulfillment/${fulfillmentId}`;
-    const patchAuth = generateOAuthHeader("PATCH", patchUrl, {}, config);
-    const patchResp = await fetch(patchUrl, {
-      method: "PATCH",
-      headers: {
-        Authorization: patchAuth,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ shipStatus: "C" }),
-    });
-    shipStatusSet = patchResp.ok;
-    if (!patchResp.ok) {
-      const t = await patchResp.text();
-      console.error("shipStatus PATCH failed:", patchResp.status, t.slice(0, 400));
-    }
-  } catch (e) {
-    console.error("shipStatus PATCH threw:", e.message);
-  }
-  if (!shipStatusSet) {
-    try {
-      await writeSession({
-        ...session,
-        fulfillmentId,
-        status: "fulfilled_pending_receipt",
-        updatedAt: new Date().toISOString(),
-      });
-    } catch {}
-    return res.status(207).json({
-      status: "partial_success",
-      fulfillmentId,
-      errorMessage: "Item Fulfillment created but could not be advanced to Shipped. Receipt cannot be created until shipStatus=C.",
-      retryUrl: `/api/transfer-orders/${toId}/retry-receipt`,
-    });
-  }
-
-  // ─── STEP 10: Receipt via RESTlet ───
-  //
-  // The standard REST Record API `!transform/itemReceipt` paths are
-  // blocked in our account (every variant returns "transformation not
-  // allowed" or "invalid reference"). We sidestep by calling a small
-  // SuiteScript RESTlet (netsuite/receiveTransferOrder.js) which uses
-  // N/record.transform() — that API has no such restriction.
-  //
-  // The RESTlet URL is configured via NS_RESTLET_RECEIVE_TO_URL env var.
-  // See netsuite/README.md for one-time deployment instructions.
-  const restletUrl = process.env.NS_RESTLET_RECEIVE_TO_URL;
-  if (!restletUrl) {
-    // RESTlet not configured. Fall back to stuck-TO state so an admin
-    // can manually receive IF in the NS UI.
-    try {
-      await writeSession({
-        ...session,
-        fulfillmentId,
-        status: "fulfilled_pending_receipt",
-        updatedAt: new Date().toISOString(),
-      });
-    } catch {}
-    return res.status(207).json({
-      status: "partial_success",
-      fulfillmentId,
-      errorMessage:
-        "Item Fulfillment created. Receipt needs manual creation in NetSuite — " +
-        "NS_RESTLET_RECEIVE_TO_URL is not configured. See netsuite/README.md.",
-      retryUrl: `/api/transfer-orders/${toId}/retry-receipt`,
-    });
-  }
+  // ─── STEP 9: Receipt via RESTlet (same RESTlet, action=receive) ───
 
   // Resolve destination bin NAME → internal ID via SuiteQL (the RESTlet
   // takes a bin internal id, not a name).
@@ -519,23 +401,13 @@ export default async function handler(req, res) {
     transferOrderId: String(toId),
     fulfillmentId: String(fulfillmentId),
     destBinId: String(destBinId),
+    action: "receive",
     lines: restletLines,
   };
 
   let receiptId = null;
   try {
-    // Parse the configured URL to extract query params (script + deploy)
-    // so we can sign them in the OAuth base string. NS RESTlet URLs are
-    // always of the form .../restlet.nl?script={id}&deploy={id}.
-    const [restletBase, restletQs] = restletUrl.split("?");
-    const restletQp = {};
-    if (restletQs) {
-      for (const pair of restletQs.split("&")) {
-        const [k, ...rest] = pair.split("=");
-        if (k) restletQp[decodeURIComponent(k)] = decodeURIComponent(rest.join("="));
-      }
-    }
-    const restletAuth = generateOAuthHeader("POST", restletBase, restletQp, config);
+    const { base: restletBase, auth: restletAuth } = signRestletAuth();
 
     const restletResp = await fetch(restletUrl, {
       method: "POST",

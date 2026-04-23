@@ -231,6 +231,7 @@ export default async function handler(req, res) {
     transferOrderId: String(toId),
     fulfillmentId: String(fulfillmentId),
     destBinId,
+    action: "receive",
     lines: restletLines,
   };
 
