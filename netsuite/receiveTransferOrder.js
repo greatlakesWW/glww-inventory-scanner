@@ -14,7 +14,8 @@
  *
  * ─── Request body ────────────────────────────────────────────
  * {
- *   "transferOrderId": "523165",        // required, string id
+ *   "fulfillmentId":   "526977",        // required, string id of the IF
+ *   "transferOrderId": "523165",        // informational, audited in logs
  *   "destBinId":       "123",            // required, bin internal id
  *   "lines": [                           // required, 1+ entries
  *     { "orderLine": 48, "quantity": 1 },
@@ -22,10 +23,15 @@
  *   ]
  * }
  *
- * `orderLine` values must match the TO's transactionline sequence
- * numbers for receive-side sub-rows. For each line the picker actually
- * fulfilled: orderLine = REST `l.line` + 2. The caller computes this
- * and passes it in — the RESTlet just uses what it receives.
+ * The receipt is transformed from the Item Fulfillment (not the
+ * source TO). SuiteScript's TRANSFER_ORDER → ITEM_RECEIPT transform
+ * is rejected with INVALID_INITIALIZE_REF; ITEM_FULFILLMENT →
+ * ITEM_RECEIPT works as intended.
+ *
+ * `orderLine` values should match each picked line in the IF's item
+ * sublist (IF's own `line` field). The caller (fulfill.js) knows these
+ * from its POST response; retry-receipt.js reconstructs them from REST
+ * `l.line + 2` (receive-side sub-row per NS's 3-rows-per-item layout).
  *
  * ─── Response ────────────────────────────────────────────────
  * On success (200):
@@ -44,11 +50,12 @@ define(['N/record', 'N/log'], function (record, log) {
     log.audit({ title: 'receiveTransferOrder.request', details: body });
 
     // ─── Validate inputs ───
+    var fulfillmentId = body && body.fulfillmentId ? String(body.fulfillmentId) : '';
     var toId = body && body.transferOrderId ? String(body.transferOrderId) : '';
     var destBinId = body && body.destBinId ? String(body.destBinId) : '';
     var lines = body && Array.isArray(body.lines) ? body.lines : [];
 
-    if (!toId) { throw Error('transferOrderId is required'); }
+    if (!fulfillmentId) { throw Error('fulfillmentId is required'); }
     if (!destBinId) { throw Error('destBinId is required'); }
     if (lines.length === 0) { throw Error('lines[] must be non-empty'); }
 
@@ -61,12 +68,18 @@ define(['N/record', 'N/log'], function (record, log) {
       if (qty > 0) { qtyByOrderLine[ol] = qty; }
     }
 
-    // ─── Transform TO → IR ───
+    // ─── Transform IF → IR ───
     // Dynamic mode so we can manipulate the inventoryDetail subrecord's
     // inventoryassignment sublist (select/commit pattern).
+    //
+    // The receipt comes from the IF, not the TO. Even though NS stores
+    // `createdFrom` on the resulting receipt as the TO (because it
+    // propagates the original order reference through the chain), the
+    // actual transform API rejects TRANSFER_ORDER as fromType with
+    // INVALID_INITIALIZE_REF. IF → IR works.
     var receipt = record.transform({
-      fromType: record.Type.TRANSFER_ORDER,
-      fromId: toId,
+      fromType: record.Type.ITEM_FULFILLMENT,
+      fromId: fulfillmentId,
       toType: record.Type.ITEM_RECEIPT,
       isDynamic: true,
     });

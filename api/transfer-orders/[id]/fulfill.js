@@ -479,19 +479,39 @@ export default async function handler(req, res) {
     });
   }
 
-  // Build RESTlet payload. orderLine values reference the TO's RECEIVE-
-  // side sub-row for each item (REST l.line + 2). The RESTlet walks the
-  // transformed Item Receipt's sublist and matches entries by that id.
-  const restletLines = [];
+  // Build RESTlet payload. The RESTlet transforms IF → IR, so orderLine
+  // on each receipt line references the IF's own sublist line numbers
+  // (0, 3, 6...). Fetch the IF we just created to read those values,
+  // then match each IF line to our picks by itemId.
+  let ffLinesForReceipt = [];
+  try {
+    const ffGetUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/itemFulfillment/${fulfillmentId}?expandSubResources=true`;
+    const ffGetResp = await nsGet(ffGetUrl, config);
+    const ffGetData = await readJsonResp(ffGetResp);
+    if (ffGetResp.ok && ffGetData?.item?.items) {
+      ffLinesForReceipt = ffGetData.item.items;
+    }
+  } catch (e) {
+    console.error("IF re-fetch for receipt build failed:", e.message);
+  }
+
+  // Aggregate session picks by itemId (the key into the IF sublist).
+  const pickedQtyByItemId = {};
   for (const [lid, roll] of Object.entries(lineRoll)) {
     const meta = lineMeta[lid];
-    if (!meta) continue;
-    const picked = Number(roll.totalQty) || 0;
-    if (picked <= 0) continue;
-    // meta.orderLine is REST l.line + 1 (fulfillment-side sub-row). The
-    // receipt wants the NEXT sub-row, so +2 from REST — i.e. meta.orderLine + 1.
+    if (!meta?.itemId) continue;
+    const q = Number(roll.totalQty) || 0;
+    if (q > 0) pickedQtyByItemId[meta.itemId] = (pickedQtyByItemId[meta.itemId] || 0) + q;
+  }
+
+  const restletLines = [];
+  for (const ffLine of ffLinesForReceipt) {
+    const itemId = ffLine.item?.id != null ? String(ffLine.item.id) : null;
+    if (!itemId) continue;
+    const picked = pickedQtyByItemId[itemId];
+    if (!picked || picked <= 0) continue;
     restletLines.push({
-      orderLine: meta.orderLine + 1,
+      orderLine: Number(ffLine.line),
       quantity: picked,
     });
   }
