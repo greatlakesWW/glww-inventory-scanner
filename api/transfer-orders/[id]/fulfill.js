@@ -392,39 +392,68 @@ export default async function handler(req, res) {
     console.error("Failed to persist fulfillmentId to session:", e);
   }
 
-  // ─── STEP 10: Prepare receipt payload ───
+  // ─── STEP 9b: Advance IF to "Shipped" status (shipStatus=C) ───
   //
-  // Two subtle differences from the fulfillment payload, discovered by
-  // inspecting an existing IR created from a TO 523165 fulfillment:
-  //
-  // 1. Receipt `orderLine` references the FULFILLMENT's own `line` values
-  //    (0, 3, 6...), NOT the source TO's line values. We POST the receipt
-  //    against the fulfillment's transform URL, so "order" here means the
-  //    fulfillment. After creating the IF we GET it back, read its item
-  //    sublist, and map fulfillment.line → itemId (to correlate with our
-  //    picks) and use fulfillment.line as the receipt's orderLine.
-  //
-  // 2. `binNumber` on inventoryAssignment is an OBJECT `{id: "..."}` using
-  //    the bin's internal ID, not a string with the bin's display name.
-  //    We resolve F-01-0001 (or whatever the configured bin name is) to
-  //    its internal ID via SuiteQL.
-
-  // Step 10a — fetch the just-created fulfillment to learn its line structure.
-  let ffLines = [];
+  // The standard REST transform `!transform/itemFulfillment` leaves the
+  // new IF in shipStatus "A" (Picked). NS requires shipStatus "C"
+  // (Shipped) before any Item Receipt can be created against the TO —
+  // otherwise you get "invalid reference {toId}" when calling the
+  // RESTlet. A small PATCH moves the IF forward. Failures here are
+  // logged but we still attempt the receipt — NS may auto-advance
+  // shipStatus server-side in some configurations.
   try {
-    const ffGetUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/itemFulfillment/${fulfillmentId}?expandSubResources=true`;
-    const ffGetResp = await nsGet(ffGetUrl, config);
-    const ffGetData = await readJsonResp(ffGetResp);
-    if (ffGetResp.ok && ffGetData?.item?.items) {
-      ffLines = ffGetData.item.items;
-    } else {
-      console.error("Fulfillment GET failed:", ffGetResp.status, JSON.stringify(ffGetData).slice(0, 400));
+    const patchUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/itemFulfillment/${fulfillmentId}`;
+    const patchAuth = generateOAuthHeader("PATCH", patchUrl, {}, config);
+    const patchResp = await fetch(patchUrl, {
+      method: "PATCH",
+      headers: {
+        Authorization: patchAuth,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ shipStatus: "C" }),
+    });
+    if (!patchResp.ok) {
+      const t = await patchResp.text();
+      console.warn("shipStatus PATCH non-2xx:", patchResp.status, t.slice(0, 400));
     }
   } catch (e) {
-    console.error("Fulfillment GET threw:", e.message);
+    console.warn("shipStatus PATCH threw:", e.message);
   }
 
-  // Step 10b — resolve destination bin NAME → internal ID via SuiteQL.
+  // ─── STEP 10: Receipt via RESTlet ───
+  //
+  // The standard REST Record API `!transform/itemReceipt` paths are
+  // blocked in our account (every variant returns "transformation not
+  // allowed" or "invalid reference"). We sidestep by calling a small
+  // SuiteScript RESTlet (netsuite/receiveTransferOrder.js) which uses
+  // N/record.transform() — that API has no such restriction.
+  //
+  // The RESTlet URL is configured via NS_RESTLET_RECEIVE_TO_URL env var.
+  // See netsuite/README.md for one-time deployment instructions.
+  const restletUrl = process.env.NS_RESTLET_RECEIVE_TO_URL;
+  if (!restletUrl) {
+    // RESTlet not configured. Fall back to stuck-TO state so an admin
+    // can manually receive IF in the NS UI.
+    try {
+      await writeSession({
+        ...session,
+        fulfillmentId,
+        status: "fulfilled_pending_receipt",
+        updatedAt: new Date().toISOString(),
+      });
+    } catch {}
+    return res.status(207).json({
+      status: "partial_success",
+      fulfillmentId,
+      errorMessage:
+        "Item Fulfillment created. Receipt needs manual creation in NetSuite — " +
+        "NS_RESTLET_RECEIVE_TO_URL is not configured. See netsuite/README.md.",
+      retryUrl: `/api/transfer-orders/${toId}/retry-receipt`,
+    });
+  }
+
+  // Resolve destination bin NAME → internal ID via SuiteQL (the RESTlet
+  // takes a bin internal id, not a name).
   let destBinId = null;
   try {
     const binQ = `SELECT id, binnumber FROM Bin WHERE binnumber = '${destBinNumber.replace(/'/g, "''")}' FETCH FIRST 1 ROWS ONLY`;
@@ -434,8 +463,6 @@ export default async function handler(req, res) {
     console.error("Destination bin lookup failed:", e.message);
   }
   if (!destBinId) {
-    // Can't proceed without the bin id — mark session stuck so the FF isn't
-    // orphaned silently and an admin can retry once the bin is resolved.
     try {
       await writeSession({
         ...session,
@@ -452,62 +479,71 @@ export default async function handler(req, res) {
     });
   }
 
-  // Step 10c — build receipt payload using the fulfillment's line structure.
-  // Match each IF line to our pick by itemId (both session events and the
-  // fulfillment carry item ids that tie back to the source TO line).
-  const receiptLines = [];
-  for (const ffLine of ffLines) {
-    const ffLineNumber = Number(ffLine.line);
-    const itemId = ffLine.item?.id != null ? String(ffLine.item.id) : null;
-    // Find the session pick for this item. Multiple TO lines COULD share the
-    // same itemId in weird edge cases, but for the GLWW setup each SKU is
-    // a distinct variant so the mapping is 1:1.
-    const matchingLineId = Object.keys(lineRoll).find((lid) => {
-      const meta = lineMeta[lid];
-      return meta && meta.itemId === itemId;
+  // Build RESTlet payload. orderLine values reference the TO's RECEIVE-
+  // side sub-row for each item (REST l.line + 2). The RESTlet walks the
+  // transformed Item Receipt's sublist and matches entries by that id.
+  const restletLines = [];
+  for (const [lid, roll] of Object.entries(lineRoll)) {
+    const meta = lineMeta[lid];
+    if (!meta) continue;
+    const picked = Number(roll.totalQty) || 0;
+    if (picked <= 0) continue;
+    // meta.orderLine is REST l.line + 1 (fulfillment-side sub-row). The
+    // receipt wants the NEXT sub-row, so +2 from REST — i.e. meta.orderLine + 1.
+    restletLines.push({
+      orderLine: meta.orderLine + 1,
+      quantity: picked,
     });
-    const picked = matchingLineId ? Number(lineRoll[matchingLineId].totalQty) || 0 : 0;
-
-    if (picked > 0) {
-      receiptLines.push({
-        orderLine: ffLineNumber,
-        quantity: picked,
-        itemReceive: true,
-        inventoryDetail: {
-          inventoryAssignment: {
-            items: [{ quantity: picked, binNumber: { id: destBinId } }],
-          },
-        },
-      });
-    } else {
-      receiptLines.push({
-        orderLine: ffLineNumber,
-        quantity: 0,
-        itemReceive: false,
-      });
-    }
   }
-  const receiptPayload = { item: { items: receiptLines } };
 
-  const rcUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/itemFulfillment/${fulfillmentId}/!transform/itemReceipt`;
+  const restletBody = {
+    transferOrderId: String(toId),
+    fulfillmentId: String(fulfillmentId),
+    destBinId: String(destBinId),
+    lines: restletLines,
+  };
 
   let receiptId = null;
   try {
-    const rcResp = await nsPost(rcUrl, receiptPayload, config);
-    const rcText = await rcResp.text();
-    let rcData = null;
-    if (rcText) { try { rcData = JSON.parse(rcText); } catch { rcData = rcText; } }
+    // Parse the configured URL to extract query params (script + deploy)
+    // so we can sign them in the OAuth base string. NS RESTlet URLs are
+    // always of the form .../restlet.nl?script={id}&deploy={id}.
+    const [restletBase, restletQs] = restletUrl.split("?");
+    const restletQp = {};
+    if (restletQs) {
+      for (const pair of restletQs.split("&")) {
+        const [k, ...rest] = pair.split("=");
+        if (k) restletQp[decodeURIComponent(k)] = decodeURIComponent(rest.join("="));
+      }
+    }
+    const restletAuth = generateOAuthHeader("POST", restletBase, restletQp, config);
 
-    if (!(rcResp.status === 204 || rcResp.status === 200 || rcResp.status === 201)) {
-      // STEP 13: receipt failure. Mark session stuck, log error, return 207.
-      console.error("Item Receipt create failed:", rcResp.status, rcText.slice(0, 600));
-      console.error("Item Receipt request payload:", JSON.stringify(receiptPayload));
-      console.error("Item Receipt fulfillment lines summary:", JSON.stringify(ffLines.map((l) => ({ line: l.line, orderLine: l.orderLine, itemId: l.item?.id, qty: l.quantity }))));
-      console.error("Item Receipt destBinId:", destBinId, "destBinNumber:", destBinNumber);
+    const restletResp = await fetch(restletUrl, {
+      method: "POST",
+      headers: {
+        Authorization: restletAuth,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(restletBody),
+    });
+    const restletText = await restletResp.text();
+    let restletData = null;
+    if (restletText) {
+      try { restletData = JSON.parse(restletText); } catch { restletData = restletText; }
+    }
+
+    if (!restletResp.ok || !restletData?.receiptId) {
+      console.error("RESTlet receipt create failed:", restletResp.status, restletText.slice(0, 800));
+      console.error("RESTlet request payload:", JSON.stringify(restletBody));
+
       const errorMessage =
-        (rcData && typeof rcData === "object" && rcData["o:errorDetails"] && rcData["o:errorDetails"][0]?.detail) ||
-        (rcData && typeof rcData === "object" && (rcData.title || rcData.error)) ||
-        `NetSuite returned ${rcResp.status}`;
+        (restletData && typeof restletData === "object" &&
+          (restletData["o:errorDetails"]?.[0]?.detail ||
+            restletData.error?.message ||
+            restletData.message ||
+            restletData.error)) ||
+        (typeof restletData === "string" ? restletData.slice(0, 200) : null) ||
+        `RESTlet returned ${restletResp.status}`;
 
       try {
         await writeSession({
@@ -526,16 +562,16 @@ export default async function handler(req, res) {
         tranId: to.tranId || null,
         sessionId: session.sessionId,
         pickerName: session.pickerName || null,
-        step: "item_receipt",
+        step: "item_receipt_restlet",
         fulfillmentId,
         isRetry: false,
         netsuite: {
-          status: rcResp.status,
-          statusText: rcResp.statusText || "",
-          url: rcUrl,
-          body: rcData,
+          status: restletResp.status,
+          statusText: restletResp.statusText || "",
+          url: restletBase,
+          body: restletData,
         },
-        requestPayload: receiptPayload,
+        requestPayload: restletBody,
       });
 
       return res.status(207).json({
@@ -546,11 +582,22 @@ export default async function handler(req, res) {
       });
     }
 
-    receiptId = extractRecordId(rcResp.headers.get("Location"));
+    receiptId = String(restletData.receiptId);
   } catch (e) {
-    return res.status(500).json({
-      error: `Item Receipt POST failed: ${e.message}`,
+    console.error("RESTlet call threw:", e.message);
+    try {
+      await writeSession({
+        ...session,
+        fulfillmentId,
+        status: "fulfilled_pending_receipt",
+        updatedAt: new Date().toISOString(),
+      });
+    } catch {}
+    return res.status(207).json({
+      status: "partial_success",
       fulfillmentId,
+      errorMessage: `RESTlet call failed: ${e.message}`,
+      retryUrl: `/api/transfer-orders/${toId}/retry-receipt`,
     });
   }
 
