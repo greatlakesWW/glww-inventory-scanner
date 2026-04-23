@@ -395,12 +395,15 @@ export default async function handler(req, res) {
   // ─── STEP 9b: Advance IF to "Shipped" status (shipStatus=C) ───
   //
   // The standard REST transform `!transform/itemFulfillment` leaves the
-  // new IF in shipStatus "A" (Picked). NS requires shipStatus "C"
-  // (Shipped) before any Item Receipt can be created against the TO —
-  // otherwise you get "invalid reference {toId}" when calling the
-  // RESTlet. A small PATCH moves the IF forward. Failures here are
-  // logged but we still attempt the receipt — NS may auto-advance
-  // shipStatus server-side in some configurations.
+  // new IF in shipStatus "A" (Picked). The TO cannot be received via
+  // record.transform(TO→IR) until every linked IF is shipStatus "C"
+  // (Shipped) — at that point the TO flips to "Pending Receipt" and
+  // transform-from-TO is allowed. If the PATCH fails silently, the TO
+  // stays "Partially Fulfilled" and the RESTlet below throws
+  // INVALID_INITIALIZE_REF. So this step is a hard gate: bail into
+  // fulfilled_pending_receipt immediately if it fails, instead of
+  // letting the picker see a confusing downstream error.
+  let shipStatusSet = false;
   try {
     const patchUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/itemFulfillment/${fulfillmentId}`;
     const patchAuth = generateOAuthHeader("PATCH", patchUrl, {}, config);
@@ -412,12 +415,29 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({ shipStatus: "C" }),
     });
+    shipStatusSet = patchResp.ok;
     if (!patchResp.ok) {
       const t = await patchResp.text();
-      console.warn("shipStatus PATCH non-2xx:", patchResp.status, t.slice(0, 400));
+      console.error("shipStatus PATCH failed:", patchResp.status, t.slice(0, 400));
     }
   } catch (e) {
-    console.warn("shipStatus PATCH threw:", e.message);
+    console.error("shipStatus PATCH threw:", e.message);
+  }
+  if (!shipStatusSet) {
+    try {
+      await writeSession({
+        ...session,
+        fulfillmentId,
+        status: "fulfilled_pending_receipt",
+        updatedAt: new Date().toISOString(),
+      });
+    } catch {}
+    return res.status(207).json({
+      status: "partial_success",
+      fulfillmentId,
+      errorMessage: "Item Fulfillment created but could not be advanced to Shipped. Receipt cannot be created until shipStatus=C.",
+      retryUrl: `/api/transfer-orders/${toId}/retry-receipt`,
+    });
   }
 
   // ─── STEP 10: Receipt via RESTlet ───
@@ -479,41 +499,19 @@ export default async function handler(req, res) {
     });
   }
 
-  // Build RESTlet payload. The RESTlet transforms IF → IR, so orderLine
-  // on each receipt line references the IF's own sublist line numbers
-  // (0, 3, 6...). Fetch the IF we just created to read those values,
-  // then match each IF line to our picks by itemId.
-  let ffLinesForReceipt = [];
-  try {
-    const ffGetUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/itemFulfillment/${fulfillmentId}?expandSubResources=true`;
-    const ffGetResp = await nsGet(ffGetUrl, config);
-    const ffGetData = await readJsonResp(ffGetResp);
-    if (ffGetResp.ok && ffGetData?.item?.items) {
-      ffLinesForReceipt = ffGetData.item.items;
-    }
-  } catch (e) {
-    console.error("IF re-fetch for receipt build failed:", e.message);
-  }
-
-  // Aggregate session picks by itemId (the key into the IF sublist).
-  const pickedQtyByItemId = {};
+  // Build RESTlet payload. The RESTlet transforms TO → IR (the only
+  // programmatic receipt path this NS account permits; see the probe
+  // matrix in commit 586bab4). Receipt sublist rows are matched by
+  // itemId, not by orderLine, because the orderline field on an IR's
+  // sublist doesn't correspond to anything the caller has in hand —
+  // itemId is what we actually know.
+  const restletLines = [];
   for (const [lid, roll] of Object.entries(lineRoll)) {
     const meta = lineMeta[lid];
     if (!meta?.itemId) continue;
     const q = Number(roll.totalQty) || 0;
-    if (q > 0) pickedQtyByItemId[meta.itemId] = (pickedQtyByItemId[meta.itemId] || 0) + q;
-  }
-
-  const restletLines = [];
-  for (const ffLine of ffLinesForReceipt) {
-    const itemId = ffLine.item?.id != null ? String(ffLine.item.id) : null;
-    if (!itemId) continue;
-    const picked = pickedQtyByItemId[itemId];
-    if (!picked || picked <= 0) continue;
-    restletLines.push({
-      orderLine: Number(ffLine.line),
-      quantity: picked,
-    });
+    if (q <= 0) continue;
+    restletLines.push({ itemId: String(meta.itemId), quantity: q });
   }
 
   const restletBody = {

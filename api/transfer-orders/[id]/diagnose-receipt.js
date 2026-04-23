@@ -1,15 +1,26 @@
-import { getSuiteQLConfig } from "../../_suiteql.js";
+import { getSuiteQLConfig, runSuiteQL } from "../../_suiteql.js";
 import { generateOAuthHeader } from "../../_auth.js";
 
 // ═══════════════════════════════════════════════════════════
 // POST /api/transfer-orders/:id/diagnose-receipt
 //
-// One-shot endpoint that calls the receiveTransferOrder RESTlet with
-// diagnose:true and returns the raw JSON response. Used exactly once to
-// confirm which TO→IR programmatic path (if any) this NS account
-// permits. No session lookup, no KV writes — pure passthrough.
+// Thin passthrough to the receiveTransferOrder RESTlet. No session
+// lookup, no KV writes. Two modes:
 //
-// Body: { "fulfillmentId": "526977" }   required
+//   1. Diagnose mode — body: { "fulfillmentId": "526977" }
+//      Sends diagnose:true to the RESTlet. Returns the probe matrix
+//      and NS runtime state. Used to investigate which programmatic
+//      IR paths (if any) this account permits.
+//
+//   2. Manual receipt mode — body: {
+//        "fulfillmentId": "526977",
+//        "destBinNumber": "F-01-0001",   // or destBinId directly
+//        "lines": [ { "itemId": "123", "quantity": 1 } ]
+//      }
+//      Used by an admin to receive a specific IF without going through
+//      the picker session flow (e.g. to clean up a stuck IF, or to
+//      test the end-to-end path without putting a picker in front of
+//      the app).
 // ═══════════════════════════════════════════════════════════
 
 export default async function handler(req, res) {
@@ -49,6 +60,30 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "NS_RESTLET_RECEIVE_TO_URL is not configured" });
   }
 
+  // Determine mode: if caller provided lines[] + a bin, this is a real
+  // receipt request; otherwise it's a diagnostic probe.
+  const rawLines = Array.isArray(body.lines) ? body.lines : [];
+  const hasLines = rawLines.length > 0;
+  const destBinNumber = typeof body.destBinNumber === "string" ? body.destBinNumber.trim() : "";
+  const explicitDestBinId = body.destBinId != null ? String(body.destBinId) : "";
+
+  let destBinId = explicitDestBinId;
+  if (hasLines && !destBinId && destBinNumber) {
+    try {
+      const binQ = `SELECT id, binnumber FROM Bin WHERE binnumber = '${destBinNumber.replace(/'/g, "''")}' FETCH FIRST 1 ROWS ONLY`;
+      const { items: binRows } = await runSuiteQL(binQ);
+      if (binRows && binRows[0]?.id != null) destBinId = String(binRows[0].id);
+    } catch (e) {
+      return res.status(500).json({ error: `Bin lookup failed: ${e.message}` });
+    }
+    if (!destBinId) {
+      return res.status(400).json({ error: `Bin "${destBinNumber}" not found` });
+    }
+  }
+  if (hasLines && !destBinId) {
+    return res.status(400).json({ error: "Manual receipt requires destBinNumber or destBinId" });
+  }
+
   const [restletBase, restletQs] = restletUrl.split("?");
   const restletQp = {};
   if (restletQs) {
@@ -59,11 +94,21 @@ export default async function handler(req, res) {
   }
   const restletAuth = generateOAuthHeader("POST", restletBase, restletQp, config);
 
-  const payload = {
-    transferOrderId: String(toId),
-    fulfillmentId,
-    diagnose: true,
-  };
+  const payload = hasLines
+    ? {
+        transferOrderId: String(toId),
+        fulfillmentId,
+        destBinId,
+        lines: rawLines.map((l) => ({
+          itemId: String(l.itemId),
+          quantity: Number(l.quantity),
+        })),
+      }
+    : {
+        transferOrderId: String(toId),
+        fulfillmentId,
+        diagnose: true,
+      };
 
   try {
     const resp = await fetch(restletUrl, {

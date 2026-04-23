@@ -172,29 +172,6 @@ export default async function handler(req, res) {
     return res.status(502).json({ error: "TO has no destination location" });
   }
 
-  // ─── Load the IF so we know its own line-number scheme ───
-  // The receipt is transformed from the IF, so the RESTlet's `orderLine`
-  // values reference the IF's item sublist (line=0, 3, 6...), not the TO.
-  // Match by itemId to translate our session's picks into the IF's world.
-  let ffLines = [];
-  try {
-    const ffUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/record/v1/itemFulfillment/${fulfillmentId}?expandSubResources=true`;
-    const ffResp = await nsGet(ffUrl, config);
-    const ffData = await readJsonResp(ffResp);
-    if (!ffResp.ok) {
-      return res.status(ffResp.status || 500).json({
-        error: `NetSuite IF fetch returned ${ffResp.status}`,
-        details: ffData,
-      });
-    }
-    ffLines = Array.isArray(ffData?.item?.items) ? ffData.item.items : [];
-  } catch (e) {
-    return res.status(500).json({ error: `IF fetch failed: ${e.message}` });
-  }
-  if (ffLines.length === 0) {
-    return res.status(502).json({ error: `IF ${fulfillmentId} has no item sublist rows` });
-  }
-
   // Resolve destination bin
   const salesfloorMap = parseSalesfloorBins();
   const destBinNumber = salesfloorMap[destinationLocationId];
@@ -243,29 +220,12 @@ export default async function handler(req, res) {
     });
   }
 
-  // Build restlet lines by walking the IF sublist. For each IF line whose
-  // itemId matches one of the session's picked items, send its `line`
-  // value (the IF's own line number) as orderLine. The RESTlet uses
-  // ITEM_FULFILLMENT → ITEM_RECEIPT transform so orderLine references
-  // the IF's sublist, not the TO's.
-  const restletLines = [];
-  for (const ffLine of ffLines) {
-    const itemId = ffLine.item?.id != null ? String(ffLine.item.id) : null;
-    if (!itemId) continue;
-    const picked = qtyByItemId[itemId];
-    if (!picked || picked <= 0) continue;
-    restletLines.push({
-      orderLine: Number(ffLine.line),
-      quantity: picked,
-    });
-  }
-
-  if (restletLines.length === 0) {
-    return res.status(400).json({
-      error: "No picks matched IF sublist items",
-      details: { pickedItemIds: Object.keys(qtyByItemId), ffLineItemIds: ffLines.map((l) => l.item?.id).filter(Boolean) },
-    });
-  }
+  // The RESTlet matches receipt sublist rows by itemId (see the probe
+  // matrix in commit 586bab4 for why we use TO→IR transform, not IF→IR).
+  const restletLines = Object.entries(qtyByItemId).map(([itemId, quantity]) => ({
+    itemId,
+    quantity,
+  }));
 
   const restletBody = {
     transferOrderId: String(toId),
