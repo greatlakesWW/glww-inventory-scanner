@@ -68,21 +68,43 @@ define(['N/record', 'N/log'], function (record, log) {
       if (qty > 0) { qtyByOrderLine[ol] = qty; }
     }
 
-    // ─── Transform IF → IR ───
-    // Dynamic mode so we can manipulate the inventoryDetail subrecord's
-    // inventoryassignment sublist (select/commit pattern).
+    // ─── Create IR with createdfrom set ───
+    // This account's config blocks record.transform() for both
+    // TRANSFER_ORDER → ITEM_RECEIPT (INVALID_INITIALIZE_REF) and
+    // ITEM_FULFILLMENT → ITEM_RECEIPT (INVALID_RCRD_TRANSFRM).
     //
-    // The receipt comes from the IF, not the TO. Even though NS stores
-    // `createdFrom` on the resulting receipt as the TO (because it
-    // propagates the original order reference through the chain), the
-    // actual transform API rejects TRANSFER_ORDER as fromType with
-    // INVALID_INITIALIZE_REF. IF → IR works.
-    var receipt = record.transform({
-      fromType: record.Type.ITEM_FULFILLMENT,
-      fromId: fulfillmentId,
-      toType: record.Type.ITEM_RECEIPT,
-      isDynamic: true,
-    });
+    // Workaround: create a blank ITEM_RECEIPT with defaultValues
+    // pointing at the source document. NetSuite will auto-source the
+    // line sublist from that source. Try several key names because the
+    // exact default key for TO receipts is undocumented — we log which
+    // one worked so future maintainers know.
+    var receipt = null;
+    var lastCreateError = null;
+    var attemptKeys = [
+      { transaction: fulfillmentId },
+      { order: fulfillmentId },
+      { createdfrom: fulfillmentId },
+      { transaction: toId },
+      { order: toId },
+      { createdfrom: toId },
+    ];
+    for (var k = 0; k < attemptKeys.length; k++) {
+      try {
+        receipt = record.create({
+          type: record.Type.ITEM_RECEIPT,
+          isDynamic: true,
+          defaultValues: attemptKeys[k],
+        });
+        log.audit({ title: 'receiveTransferOrder.createWorked', details: attemptKeys[k] });
+        break;
+      } catch (err) {
+        lastCreateError = err;
+        log.debug({ title: 'receiveTransferOrder.createAttemptFailed', details: { tried: attemptKeys[k], msg: err.message } });
+      }
+    }
+    if (!receipt) {
+      throw Error('All record.create attempts for ITEM_RECEIPT failed. Last error: ' + (lastCreateError && lastCreateError.message));
+    }
 
     // ─── Walk the sublist ───
     // The pre-populated sublist contains one line per in-transit TO line.
