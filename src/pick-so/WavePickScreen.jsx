@@ -29,7 +29,7 @@ function primaryBin(line) {
 
 export default function WavePickScreen({ wave, location, onComplete, onBack }) {
   const {
-    session, recordScan, complete,
+    session, recordScan, removeSO, complete,
   } = useWavePickSession(wave);
 
   const [detailBySO, setDetailBySO] = useState({});
@@ -40,6 +40,8 @@ export default function WavePickScreen({ wave, location, onComplete, onBack }) {
   const [banner, setBanner] = useState(null); // { kind: "ok"|"warn"|"err", text }
   const [completing, setCompleting] = useState(false);
   const [result, setResult] = useState(null); // { status, results:[...], waveShortages:[] }
+  const [manageOpen, setManageOpen] = useState(false);
+  const [removingSOId, setRemovingSOId] = useState(null);
 
   const binScanRef = useRef(null);
   const itemScanRef = useRef(null);
@@ -244,6 +246,34 @@ export default function WavePickScreen({ wave, location, onComplete, onBack }) {
   useScanRefocus(binScanRef, !currentBin && !completing && !result);
   useScanRefocus(itemScanRef, !!currentBin && !completing && !result);
 
+  // ─── Remove SO from wave ──────────────────────────────────────
+  const handleRemoveSO = useCallback(async (soId) => {
+    const d = detailBySO[soId];
+    const label = d?.tranId || `#${soId}`;
+    if (session?.soIds?.length <= 1) {
+      showBanner("warn", "Can't remove the last SO — tap Back to exit the wave");
+      return;
+    }
+    if (!confirm(`Remove ${label} from the wave? Scans stay; any already-picked units just go toward the remaining SOs.`)) return;
+    setRemovingSOId(soId);
+    try {
+      await removeSO(soId);
+      // Drop cached detail so it doesn't linger in the aggregate.
+      setDetailBySO((prev) => {
+        const next = { ...prev };
+        delete next[soId];
+        return next;
+      });
+      beepOk();
+      showBanner("ok", `${label} removed`, 1800);
+    } catch (e) {
+      beepWarn();
+      showBanner("err", e.message || "Remove failed");
+    } finally {
+      setRemovingSOId(null);
+    }
+  }, [detailBySO, session?.soIds, removeSO, showBanner]);
+
   // ─── Complete wave ────────────────────────────────────────────
   const onTapComplete = useCallback(async () => {
     if (totalPicked === 0) {
@@ -352,9 +382,20 @@ export default function WavePickScreen({ wave, location, onComplete, onBack }) {
       <div style={S.hdr}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <Logo />
-          <span style={{ fontSize: 14, fontWeight: 700, letterSpacing: 0.3 }}>
-            Wave Pick · {session.soIds.length} SO{session.soIds.length === 1 ? "" : "s"}
-          </span>
+          <button
+            onClick={() => setManageOpen(true)}
+            style={{
+              ...S.btnSm,
+              fontSize: 13,
+              fontWeight: 700,
+              letterSpacing: 0.3,
+              padding: "6px 10px",
+              background: "transparent",
+              border: "1px solid #334155",
+            }}
+          >
+            Wave · {session.soIds.length} SO{session.soIds.length === 1 ? "" : "s"} ▾
+          </button>
         </div>
         <button onClick={onBack} style={{ ...S.btnSm, fontSize: 12 }}>← Back</button>
       </div>
@@ -367,6 +408,95 @@ export default function WavePickScreen({ wave, location, onComplete, onBack }) {
           transition: "background 200ms",
           zIndex: 1,
         }} />
+      )}
+
+      {/* Manage wave modal */}
+      {manageOpen && (
+        <div
+          style={{
+            position: "fixed", inset: 0, zIndex: 10,
+            background: "rgba(2,6,23,0.75)",
+            display: "flex", alignItems: "flex-end", justifyContent: "center",
+          }}
+          onClick={() => setManageOpen(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "100%", maxWidth: 480,
+              background: "#0b1220",
+              borderTop: "1px solid #1e293b",
+              borderRadius: "12px 12px 0 0",
+              padding: 16,
+              maxHeight: "80vh",
+              overflow: "auto",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+              <div style={{ fontSize: 15, fontWeight: 700, color: "#e2e8f0" }}>Wave ({session.soIds.length})</div>
+              <button onClick={() => setManageOpen(false)} style={{ ...S.btnSm, fontSize: 12 }}>Close</button>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {session.soIds.map((sid) => {
+                const d = detailBySO[sid];
+                const removing = removingSOId === sid;
+                const onlyOne = session.soIds.length <= 1;
+                return (
+                  <div
+                    key={sid}
+                    style={{
+                      ...S.card,
+                      padding: "10px 12px",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                      border: `1px solid ${ACCENT}25`,
+                      background: `${ACCENT}06`,
+                    }}
+                  >
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: "#e2e8f0", ...mono }}>
+                        {d?.tranId || `#${sid}`}
+                      </div>
+                      {d?.customerName && (
+                        <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {d.customerName}
+                        </div>
+                      )}
+                      {d?.lines && (
+                        <div style={{ fontSize: 10, color: "#64748b", marginTop: 2, ...mono }}>
+                          {d.lines.length} line{d.lines.length === 1 ? "" : "s"}
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => handleRemoveSO(sid)}
+                      disabled={removing || onlyOne}
+                      title={onlyOne ? "Can't remove the last SO — tap Back to exit" : "Remove from wave"}
+                      style={{
+                        padding: "6px 10px",
+                        fontSize: 11,
+                        fontWeight: 700,
+                        color: onlyOne ? "#475569" : ERR,
+                        background: onlyOne ? "transparent" : `${ERR}10`,
+                        border: `1px solid ${onlyOne ? "#334155" : `${ERR}40`}`,
+                        borderRadius: 4,
+                        cursor: removing || onlyOne ? "default" : "pointer",
+                        opacity: removing ? 0.5 : 1,
+                        touchAction: "manipulation",
+                      }}
+                    >
+                      {removing ? "..." : "Remove"}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{ fontSize: 11, color: "#64748b", marginTop: 12, lineHeight: 1.4 }}>
+              Removing an SO keeps your existing scans. Any scanned units the removed SO would have used just feed the remaining SOs FIFO.
+            </div>
+          </div>
+        </div>
       )}
 
       <div style={{ padding: "10px 14px 180px", position: "relative", zIndex: 2 }}>
