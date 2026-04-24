@@ -121,6 +121,28 @@ export default function SOListScreen({ location, onStartPick, onBack }) {
 
   const selectedCount = selectedIds.size;
 
+  const postSession = async ({ force }) => {
+    const name = pickerName.trim();
+    const resp = await fetch("/api/so-sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pickerName: name,
+        locationId: String(location.id),
+        soIds: [...selectedIds],
+        ...(force ? { force: true } : {}),
+      }),
+    });
+    const data = await resp.json();
+    return { resp, data };
+  };
+
+  const describeLock = (c) => {
+    const tran = orderByTran[String(c.soId)]?.tranId || `#${c.soId}`;
+    const when = c.lockedAt ? ` · locked ${formatRelative(c.lockedAt)}` : "";
+    return `${tran} by ${c.lockedBy}${when}`;
+  };
+
   const startPick = async () => {
     setStartError(null);
     const name = pickerName.trim();
@@ -129,22 +151,37 @@ export default function SOListScreen({ location, onStartPick, onBack }) {
     saveSession(PICKER_NAME_KEY, name);
     setStarting(true);
     try {
-      const resp = await fetch("/api/so-sessions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          pickerName: name,
-          locationId: String(location.id),
-          soIds: [...selectedIds],
-        }),
-      });
-      const data = await resp.json();
-      if (!resp.ok) {
-        throw new Error(
-          data?.conflicts
-            ? `Locked: ${data.conflicts.map((c) => `SO${c.soId} by ${c.lockedBy}`).join(", ")}`
-            : data?.error || `API ${resp.status}`
+      let { resp, data } = await postSession({ force: false });
+
+      // Offer override for locks that were placed but never actually
+      // picked (hasScans=false). The backend re-checks this on the
+      // force call, so there's no way to clobber real work even if the
+      // client raced.
+      if (resp.status === 409 && data?.error === "locked" && Array.isArray(data.conflicts)) {
+        const releasable = data.conflicts.filter((c) => !c.hasScans);
+        const stuck = data.conflicts.filter((c) => c.hasScans);
+        if (stuck.length > 0) {
+          throw new Error(
+            "Some SOs are actively being picked: " +
+              stuck.map(describeLock).join("; ") +
+              ". Ask that picker to pause or complete first."
+          );
+        }
+        const lines = releasable.map(describeLock).join("\n  • ");
+        const ok = confirm(
+          `The following SO${releasable.length === 1 ? " is" : "s are"} held by another picker but haven't been scanned yet:\n\n  • ${lines}\n\nOverride and take over?`
         );
+        if (!ok) throw new Error("Cancelled");
+        ({ resp, data } = await postSession({ force: true }));
+      }
+
+      if (!resp.ok) {
+        const msg = data?.error === "locked_with_scans"
+          ? "Cannot override: " + (data.conflicts || []).map(describeLock).join("; ")
+          : data?.conflicts
+            ? `Locked: ${data.conflicts.map(describeLock).join("; ")}`
+            : data?.error || `API ${resp.status}`;
+        throw new Error(msg);
       }
       onStartPick(data);
     } catch (e) {
