@@ -268,6 +268,35 @@ export default function WavePickScreen({ wave, location, onComplete, onBack }) {
   useScanRefocus(binScanRef, !currentBin && !completing && !result);
   useScanRefocus(itemScanRef, !!currentBin && !completing && !result);
 
+  // ─── Manual +1 (no-UPC items, scanner issues, etc.) ──────────
+  // Items like laces don't carry a UPC. Picker taps +1 on the row,
+  // confirms, and we record the scan against the item's primary bin
+  // (first bin from binAvailability, which the detail endpoint sorts
+  // ascending). If there's no bin data we can't record the scan, so
+  // the button is disabled.
+  const handleManualAdd = useCallback(async (row) => {
+    const label = row.meta.sku || `#${row.itemId}`;
+    const primary = row.bins?.[0];
+    const binId = primary?.binId || currentBin?.binId || null;
+    const binNumber = primary?.binNumber || currentBin?.binNumber || null;
+    if (!binId) {
+      beepWarn();
+      showBanner("warn", `No bin data for ${label} — scan a bin first`);
+      return;
+    }
+    if (!confirm(
+      `Mark one ${label} as picked from ${binNumber}?\n\nOnly use this if the item can't be scanned (missing UPC, etc.).`
+    )) return;
+    try {
+      await recordScan({ itemId: row.itemId, binId, qty: 1 });
+      beepOk();
+      showBanner("ok", `+1 ${label} (manual)`, 1200);
+    } catch (e) {
+      beepWarn();
+      showBanner("err", e.message || "Manual add failed");
+    }
+  }, [currentBin, recordScan, showBanner]);
+
   // ─── Mark item unavailable ────────────────────────────────────
   // Picker tap: "can't find any more of this." Removes it from the
   // "still need to pick" list and lets the wave ship despite the
@@ -683,6 +712,27 @@ export default function WavePickScreen({ wave, location, onComplete, onBack }) {
                       ? row.bins.map((b) => `${b.binNumber}(${b.qtyOnHand})`).join("  ")
                       : "no stock at this location"}
                   </div>
+                  {!done && !unavail && (
+                    <button
+                      onClick={() => handleManualAdd(row)}
+                      title="Manual +1 (for items without UPC)"
+                      style={{
+                        padding: "4px 10px",
+                        fontSize: 10,
+                        fontWeight: 700,
+                        letterSpacing: 0.3,
+                        color: ACCENT,
+                        background: `${ACCENT}10`,
+                        border: `1px solid ${ACCENT}40`,
+                        borderRadius: 4,
+                        cursor: "pointer",
+                        touchAction: "manipulation",
+                        flexShrink: 0,
+                      }}
+                    >
+                      +1 Manual
+                    </button>
+                  )}
                   {!done && (
                     <button
                       onClick={() => handleToggleUnavailable(row)}
