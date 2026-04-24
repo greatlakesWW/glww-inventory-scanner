@@ -37,26 +37,23 @@ export default async function handler(req, res) {
   }
 
   try {
-    // We filter on t.status = 'B' (Pending Fulfillment). Every line
-    // on a Pending SO is unfulfilled by definition, so there's no
-    // need to compute (quantity - quantityfulfilled) — and we couldn't
-    // anyway, because transactionline.quantityfulfilled is NOT_EXPOSED
-    // to SuiteQL's SEARCH channel in this account. If we ever need to
-    // list Partially Fulfilled SOs too, that's the point to pivot to
-    // the REST Record API, same as api/transfer-orders/[id].js does.
+    // Two-query approach — SuiteQL's SEARCH channel rejects the
+    // combination of GROUP BY, aggregate functions (SUM/COUNT), and
+    // BUILTIN.DF() in this account with "Invalid or unsupported
+    // search". Splitting keeps each query on a happy path:
+    //   1. DISTINCT header list — one row per qualifying SO.
+    //   2. Aggregate line rollup for those SO ids — line_count + qty.
     //
-    // SO transactionline.quantity comes back NEGATIVE from SuiteQL
-    // (inventory-reducing entries), so we ABS() everywhere it's used
-    // for display or allocation logic.
-    const query = `
-      SELECT
+    // Pending Fulfillment (t.status='B') guarantees qty_fulfilled=0,
+    // so we don't need quantityfulfilled (which is NOT_EXPOSED to
+    // SuiteQL anyway). SO quantity is stored negative — ABS() it.
+    const headerQuery = `
+      SELECT DISTINCT
         t.id AS id,
         t.tranid AS tran_id,
         t.trandate AS tran_date,
         t.entity AS entity_id,
-        BUILTIN.DF(t.entity) AS customer_name,
-        SUM(ABS(tl.quantity)) AS remaining_qty,
-        COUNT(tl.id) AS line_count
+        BUILTIN.DF(t.entity) AS customer_name
       FROM transaction t
       INNER JOIN transactionline tl ON tl.transaction = t.id
       WHERE t.type = 'SalesOrd'
@@ -65,24 +62,61 @@ export default async function handler(req, res) {
         AND tl.location = ${locationId}
         AND tl.itemtype IN ('InvtPart', 'Assembly', 'Kit')
         AND ABS(tl.quantity) > 0
-      GROUP BY t.id, t.tranid, t.trandate, t.entity
       ORDER BY t.trandate ASC, t.id ASC
     `;
+    const { items } = await runSuiteQL(headerQuery);
 
-    const { items } = await runSuiteQL(query);
+    // Per-SO rollup so list rows can show a line/qty summary. Uses a
+    // plain GROUP BY over transactionline (no joins, no BUILTIN.DF),
+    // which the SEARCH channel accepts.
+    const aggBySoId = {};
+    if (items.length > 0) {
+      const idList = items.map((r) => Number(r.id)).filter(Number.isFinite);
+      if (idList.length > 0) {
+        const aggQuery = `
+          SELECT
+            tl.transaction AS so_id,
+            COUNT(tl.id) AS line_count,
+            SUM(ABS(tl.quantity)) AS total_qty
+          FROM transactionline tl
+          WHERE tl.transaction IN (${idList.join(",")})
+            AND tl.mainline = 'F'
+            AND tl.location = ${locationId}
+            AND tl.itemtype IN ('InvtPart', 'Assembly', 'Kit')
+            AND ABS(tl.quantity) > 0
+          GROUP BY tl.transaction
+        `;
+        try {
+          const { items: aggRows } = await runSuiteQL(aggQuery);
+          for (const a of aggRows) {
+            aggBySoId[String(a.so_id)] = {
+              lineCount: Number(a.line_count) || 0,
+              remainingQty: Number(a.total_qty) || 0,
+            };
+          }
+        } catch (e) {
+          // Non-fatal: list still works without the rollup; the UI
+          // can omit counts and fall back to detail fetches.
+          console.warn("sales-orders aggregate query failed:", e.message);
+        }
+      }
+    }
 
-    const orders = items.map((r) => ({
-      id: String(r.id),
-      tranId: r.tran_id || null,
-      orderDate: r.tran_date || null,
-      customerId: r.entity_id != null ? String(r.entity_id) : null,
-      customerName: r.customer_name || null,
-      remainingQty: Number(r.remaining_qty) || 0,
-      lineCount: Number(r.line_count) || 0,
-      lockedBy: null,
-      lockedAt: null,
-      lockedSessionId: null,
-    }));
+    const orders = items.map((r) => {
+      const agg = aggBySoId[String(r.id)] || {};
+      return {
+        id: String(r.id),
+        tranId: r.tran_id || null,
+        orderDate: r.tran_date || null,
+        customerId: r.entity_id != null ? String(r.entity_id) : null,
+        customerName: r.customer_name || null,
+        remainingQty: agg.remainingQty != null ? agg.remainingQty : null,
+        lineCount: agg.lineCount != null ? agg.lineCount : null,
+        lockedBy: null,
+        lockedAt: null,
+        lockedSessionId: null,
+      };
+    });
 
     if (orders.length > 0) {
       const lockKeys = orders.map((o) => KEY_SO_LOCK(o.id));
