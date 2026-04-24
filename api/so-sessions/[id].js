@@ -13,11 +13,13 @@ import {
 // PATCH /api/so-sessions/:id  → append event, may mutate soIds/status
 //
 // Supported event types:
-//   scan       { itemId, binId, qty }         — picker scanned an item
-//   add_so     { soId }                        — extend wave mid-pick
-//   remove_so  { soId }                        — drop an SO from wave
-//   pause      { }                             — picker paused
-//   take_over  { newPickerName }               — new picker claims wave
+//   scan              { itemId, binId, qty }   — picker scanned an item
+//   mark_unavailable  { itemId }               — "I can't find more of this"
+//   undo_unavailable  { itemId }               — toggle the above off
+//   add_so            { soId }                  — extend wave mid-pick
+//   remove_so         { soId }                  — drop an SO from wave
+//   pause             { }                       — picker paused
+//   take_over         { newPickerName }         — new picker claims wave
 // ═══════════════════════════════════════════════════════════
 
 export default async function handler(req, res) {
@@ -96,6 +98,13 @@ async function handlePatch(req, res, session) {
         return res.status(400).json({ error: "qty must be a positive number" });
       }
       newEvent = { ...baseEvent, itemId: String(itemId), binId: String(binId), qty: qtyNum };
+      break;
+    }
+    case "mark_unavailable":
+    case "undo_unavailable": {
+      const itemId = body.itemId != null ? String(body.itemId) : "";
+      if (!itemId) return res.status(400).json({ error: `${type} requires itemId` });
+      newEvent = { ...baseEvent, itemId };
       break;
     }
     case "add_so": {

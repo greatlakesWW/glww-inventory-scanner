@@ -71,6 +71,8 @@ export default function useWavePickSession(initialSession) {
 
   const addSO = useCallback((soId) => patch({ type: "add_so", soId: String(soId) }), [patch]);
   const removeSO = useCallback((soId) => patch({ type: "remove_so", soId: String(soId) }), [patch]);
+  const markUnavailable = useCallback((itemId) => patch({ type: "mark_unavailable", itemId: String(itemId) }), [patch]);
+  const undoUnavailable = useCallback((itemId) => patch({ type: "undo_unavailable", itemId: String(itemId) }), [patch]);
   const pause = useCallback(() => patch({ type: "pause" }), [patch]);
 
   const complete = useCallback(async () => {
@@ -91,6 +93,8 @@ export default function useWavePickSession(initialSession) {
     recordScan,
     addSO,
     removeSO,
+    markUnavailable,
+    undoUnavailable,
     pause,
     complete,
   };

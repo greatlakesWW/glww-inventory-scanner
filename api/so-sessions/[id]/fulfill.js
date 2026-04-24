@@ -1,3 +1,4 @@
+import { kv } from "@vercel/kv";
 import { getSuiteQLConfig, runSuiteQL } from "../../_suiteql.js";
 import { generateOAuthHeader } from "../../_auth.js";
 import {
@@ -71,18 +72,32 @@ export default async function handler(req, res) {
   // preserving the order the picker scanned them. We mutate these
   // queues as we allocate.
   const scansByItem = {};
+  const unavailableByItem = new Set();
   for (const ev of session.events || []) {
-    if (!ev || ev.type !== "scan") continue;
-    const iid = ev.itemId != null ? String(ev.itemId) : "";
-    const qty = Number(ev.qty) || 0;
-    const binId = ev.binId != null ? String(ev.binId) : "";
-    if (!iid || !binId || qty <= 0) continue;
-    (scansByItem[iid] ||= []).push({ binId, qty });
+    if (!ev) continue;
+    if (ev.type === "scan") {
+      const iid = ev.itemId != null ? String(ev.itemId) : "";
+      const qty = Number(ev.qty) || 0;
+      const binId = ev.binId != null ? String(ev.binId) : "";
+      if (!iid || !binId || qty <= 0) continue;
+      (scansByItem[iid] ||= []).push({ binId, qty });
+      continue;
+    }
+    if (ev.type === "mark_unavailable") {
+      const iid = ev.itemId != null ? String(ev.itemId) : "";
+      if (iid) unavailableByItem.add(iid);
+      continue;
+    }
+    if (ev.type === "undo_unavailable") {
+      const iid = ev.itemId != null ? String(ev.itemId) : "";
+      if (iid) unavailableByItem.delete(iid);
+      continue;
+    }
   }
   const totalScanned = Object.values(scansByItem).reduce(
     (a, q) => a + q.reduce((s, r) => s + r.qty, 0), 0
   );
-  if (totalScanned === 0) {
+  if (totalScanned === 0 && unavailableByItem.size === 0) {
     return res.status(400).json({ error: "No scan events in this wave" });
   }
 
@@ -183,12 +198,22 @@ export default async function handler(req, res) {
     const alloc = allocBySO[hdr.id];
     const hasAlloc = alloc && Object.keys(alloc).length > 0;
     const short = shortagesBySO[hdr.id] || [];
+    // Split shortages by the picker's intent:
+    //   - unavailable: picker tapped "Unavailable" in the wave, admin
+    //     must follow up with the customer.
+    //   - pending: picker didn't reach it (just ran out of time /
+    //     forgot to mark it). The SO should stay Partially Fulfilled
+    //     so someone else can finish the pick.
+    const unavailableShort = short.filter((s) => unavailableByItem.has(s.itemId));
+    const pendingShort = short.filter((s) => !unavailableByItem.has(s.itemId));
+
     if (!hasAlloc) {
       results.push({
         soId: hdr.id,
         tranId: hdr.tranId,
         status: "skipped_no_allocation",
         shortages: short,
+        unavailable: unavailableShort,
         fulfillmentId: null,
       });
       continue;
@@ -205,7 +230,11 @@ export default async function handler(req, res) {
       };
     });
 
-    const setShipped = short.length === 0;
+    // Ship if everything unpicked was explicitly flagged unavailable.
+    // That means the picker signed off on closing the pack even though
+    // it's short — the remaining shortage is a customer-service matter,
+    // not "try again later."
+    const setShipped = pendingShort.length === 0;
     const body = {
       salesOrderId: hdr.id,
       setShipped,
@@ -242,6 +271,7 @@ export default async function handler(req, res) {
         fulfillmentId: String(data.fulfillmentId),
         linesFulfilled: data.linesFulfilled || 0,
         shortages: short,
+        unavailable: unavailableShort,
       });
     } catch (e) {
       results.push({
@@ -250,8 +280,38 @@ export default async function handler(req, res) {
         status: "error",
         error: `RESTlet call threw: ${e.message}`,
         shortages: short,
+        unavailable: unavailableShort,
         fulfillmentId: null,
       });
+    }
+  }
+
+  // ─── Shortage log (admin follow-up) ───────────────────────────
+  // Anything the picker flagged unavailable is something a customer-
+  // service person needs to act on — cancel the line, refund, offer a
+  // substitute, etc. Log to KV for 30 days under shortage:{ts}:{soId}
+  // so a future admin view (or email digest) can surface them.
+  const SHORTAGE_LOG_TTL = 60 * 60 * 24 * 30;
+  for (const r of results) {
+    if (!r.unavailable || r.unavailable.length === 0) continue;
+    try {
+      const key = `shortage:${Date.now()}:${r.soId}`;
+      await kv.set(
+        key,
+        {
+          timestamp: new Date().toISOString(),
+          soId: r.soId,
+          tranId: r.tranId,
+          pickerName: session.pickerName,
+          locationId: session.locationId,
+          fulfillmentId: r.fulfillmentId,
+          shortStatus: r.status,
+          items: r.unavailable.map((s) => ({ itemId: s.itemId, short: s.short })),
+        },
+        { ex: SHORTAGE_LOG_TTL },
+      );
+    } catch (e) {
+      console.error("shortage log failed for", r.soId, e?.message);
     }
   }
 

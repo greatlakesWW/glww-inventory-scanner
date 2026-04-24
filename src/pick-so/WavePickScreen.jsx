@@ -29,7 +29,7 @@ function primaryBin(line) {
 
 export default function WavePickScreen({ wave, location, onComplete, onBack }) {
   const {
-    session, recordScan, removeSO, complete,
+    session, recordScan, removeSO, markUnavailable, undoUnavailable, complete,
   } = useWavePickSession(wave);
 
   const [detailBySO, setDetailBySO] = useState({});
@@ -140,21 +140,35 @@ export default function WavePickScreen({ wave, location, onComplete, onBack }) {
     return m;
   }, [session?.events]);
 
+  const unavailableItemIds = useMemo(() => {
+    // Latest-wins: mark_unavailable / undo_unavailable events applied in order.
+    const set = new Set();
+    for (const ev of session?.events || []) {
+      if (!ev) continue;
+      if (ev.type === "mark_unavailable") set.add(String(ev.itemId));
+      else if (ev.type === "undo_unavailable") set.delete(String(ev.itemId));
+    }
+    return set;
+  }, [session?.events]);
+
   const sortedItems = useMemo(() => {
     const rows = Object.entries(agg.needByItemId).map(([iid, need]) => {
       const meta = agg.metaByItemId[iid] || {};
       const picked = pickedByItemId[iid] || 0;
+      const unavailable = unavailableItemIds.has(iid);
       const bins = [...(meta.bins || [])].sort((a, b) =>
         String(a.binNumber).toUpperCase().localeCompare(String(b.binNumber).toUpperCase())
       );
-      return { itemId: iid, need, picked, meta, primary: primaryBin({ binAvailability: bins }), bins };
+      return { itemId: iid, need, picked, unavailable, meta, primary: primaryBin({ binAvailability: bins }), bins };
     });
     const binKey = currentBin?.binNumber ? currentBin.binNumber.toUpperCase() : null;
     const itemsInBin = binKey ? agg.binPlan[binKey] : null;
+    // Sort: active (not done, not unavailable) first — then unavailable
+    // and fully-picked items sink to the bottom.
     rows.sort((a, b) => {
-      const doneA = a.picked >= a.need;
-      const doneB = b.picked >= b.need;
-      if (doneA !== doneB) return doneA ? 1 : -1;
+      const restA = a.picked >= a.need || a.unavailable;
+      const restB = b.picked >= b.need || b.unavailable;
+      if (restA !== restB) return restA ? 1 : -1;
       if (itemsInBin) {
         const inA = itemsInBin.has(a.itemId);
         const inB = itemsInBin.has(b.itemId);
@@ -164,7 +178,7 @@ export default function WavePickScreen({ wave, location, onComplete, onBack }) {
       return 0;
     });
     return rows;
-  }, [agg, pickedByItemId, currentBin]);
+  }, [agg, pickedByItemId, unavailableItemIds, currentBin]);
 
   const totalNeed = useMemo(
     () => Object.values(agg.needByItemId).reduce((s, n) => s + n, 0),
@@ -173,6 +187,14 @@ export default function WavePickScreen({ wave, location, onComplete, onBack }) {
   const totalPicked = useMemo(
     () => Object.values(pickedByItemId).reduce((s, n) => s + n, 0),
     [pickedByItemId]
+  );
+  // Pending = rows the picker hasn't yet resolved (neither fully picked
+  // nor flagged unavailable). When pending is zero, the wave is
+  // considered "done" — either everything was picked or the missing
+  // pieces were explicitly sent to admin for customer follow-up.
+  const pendingRows = useMemo(
+    () => sortedItems.filter((r) => r.picked < r.need && !r.unavailable).length,
+    [sortedItems]
   );
 
   // ─── Flash helpers ────────────────────────────────────────────
@@ -246,6 +268,34 @@ export default function WavePickScreen({ wave, location, onComplete, onBack }) {
   useScanRefocus(binScanRef, !currentBin && !completing && !result);
   useScanRefocus(itemScanRef, !!currentBin && !completing && !result);
 
+  // ─── Mark item unavailable ────────────────────────────────────
+  // Picker tap: "can't find any more of this." Removes it from the
+  // "still need to pick" list and lets the wave ship despite the
+  // shortage. Admin gets a log entry (see api/so-sessions/[id]/fulfill.js).
+  const handleToggleUnavailable = useCallback(async (row) => {
+    const iid = row.itemId;
+    const isNow = row.unavailable;
+    try {
+      if (isNow) {
+        await undoUnavailable(iid);
+        showBanner("ok", `${row.meta.sku || "Item"} back on the list`, 1500);
+      } else {
+        const label = row.meta.sku || `#${iid}`;
+        const picked = row.picked || 0;
+        const missing = row.need - picked;
+        if (!confirm(
+          `Mark ${label} as unavailable?\n\nShipping ${picked} of ${row.need}. Admin will follow up with the customer about the ${missing} missing unit${missing === 1 ? "" : "s"}.`
+        )) return;
+        await markUnavailable(iid);
+        beepOk();
+        showBanner("ok", `${label} marked unavailable`, 1800);
+      }
+    } catch (e) {
+      beepWarn();
+      showBanner("err", e.message || "Update failed");
+    }
+  }, [markUnavailable, undoUnavailable, showBanner]);
+
   // ─── Remove SO from wave ──────────────────────────────────────
   const handleRemoveSO = useCallback(async (soId) => {
     const d = detailBySO[soId];
@@ -276,15 +326,17 @@ export default function WavePickScreen({ wave, location, onComplete, onBack }) {
 
   // ─── Complete wave ────────────────────────────────────────────
   const onTapComplete = useCallback(async () => {
-    if (totalPicked === 0) {
+    if (totalPicked === 0 && unavailableItemIds.size === 0) {
       showBanner("warn", "No scans yet — can't complete");
       return;
     }
-    if (!confirm(
-      totalPicked < totalNeed
-        ? `Complete with ${totalPicked}/${totalNeed} picked? Unpicked items will leave their SOs partially fulfilled.`
-        : `Complete wave (${totalPicked}/${totalNeed})?`
-    )) return;
+    const msg =
+      pendingRows > 0
+        ? `Complete with ${totalPicked}/${totalNeed} picked and ${pendingRows} item${pendingRows === 1 ? "" : "s"} still unresolved? Those SOs will stay Partially Fulfilled.`
+        : unavailableItemIds.size > 0
+          ? `Complete & ship ${totalPicked}/${totalNeed}? ${unavailableItemIds.size} item${unavailableItemIds.size === 1 ? "" : "s"} marked unavailable will be logged for admin follow-up.`
+          : `Complete wave (${totalPicked}/${totalNeed})?`;
+    if (!confirm(msg)) return;
     setCompleting(true);
     try {
       const r = await complete();
@@ -295,7 +347,7 @@ export default function WavePickScreen({ wave, location, onComplete, onBack }) {
     } finally {
       setCompleting(false);
     }
-  }, [totalPicked, totalNeed, complete, showBanner]);
+  }, [totalPicked, totalNeed, pendingRows, unavailableItemIds, complete, showBanner]);
 
   // ─── Early states ─────────────────────────────────────────────
   if (!session) {
@@ -569,34 +621,89 @@ export default function WavePickScreen({ wave, location, onComplete, onBack }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 6, ...fadeIn }}>
           {sortedItems.map((row) => {
             const done = row.picked >= row.need;
+            const unavail = row.unavailable;
+            const borderColor = unavail ? `${WARN}40` : done ? "#334155" : `${ACCENT}30`;
+            const bg = unavail
+              ? `${WARN}10`
+              : done
+                ? "rgba(30,41,59,0.6)"
+                : `${ACCENT}06`;
             return (
               <div
                 key={row.itemId}
                 style={{
                   ...S.card,
                   padding: "10px 12px",
-                  border: done ? "1px solid #334155" : `1px solid ${ACCENT}30`,
-                  background: done ? "rgba(30,41,59,0.6)" : `${ACCENT}06`,
-                  opacity: done ? 0.5 : 1,
+                  border: `1px solid ${borderColor}`,
+                  background: bg,
+                  opacity: done && !unavail ? 0.5 : 1,
                 }}
               >
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: "#e2e8f0", ...mono }}>
+                  <div
+                    style={{
+                      fontSize: 13,
+                      fontWeight: 700,
+                      color: unavail ? "#94a3b8" : "#e2e8f0",
+                      textDecoration: unavail ? "line-through" : "none",
+                      ...mono,
+                    }}
+                  >
                     {row.meta.sku || `#${row.itemId}`}
                   </div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: done ? "#64748b" : ACCENT, ...mono }}>
-                    {row.picked}/{row.need}
+                  <div
+                    style={{
+                      fontSize: 13,
+                      fontWeight: 700,
+                      color: unavail ? WARN : done ? "#64748b" : ACCENT,
+                      ...mono,
+                    }}
+                  >
+                    {unavail ? `short ${row.need - row.picked}` : `${row.picked}/${row.need}`}
                   </div>
                 </div>
                 {row.meta.description && (
-                  <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: "#94a3b8",
+                      marginTop: 2,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      textDecoration: unavail ? "line-through" : "none",
+                    }}
+                  >
                     {row.meta.description}
                   </div>
                 )}
-                <div style={{ fontSize: 10, color: "#64748b", marginTop: 4, ...mono }}>
-                  {row.bins.length
-                    ? row.bins.map((b) => `${b.binNumber}(${b.qtyOnHand})`).join("  ")
-                    : "no stock at this location"}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginTop: 4 }}>
+                  <div style={{ fontSize: 10, color: "#64748b", ...mono, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {row.bins.length
+                      ? row.bins.map((b) => `${b.binNumber}(${b.qtyOnHand})`).join("  ")
+                      : "no stock at this location"}
+                  </div>
+                  {!done && (
+                    <button
+                      onClick={() => handleToggleUnavailable(row)}
+                      style={{
+                        padding: "4px 10px",
+                        fontSize: 10,
+                        fontWeight: 700,
+                        letterSpacing: 0.3,
+                        color: unavail ? ACCENT : WARN,
+                        background: unavail ? `${ACCENT}10` : `${WARN}10`,
+                        border: `1px solid ${unavail ? `${ACCENT}40` : `${WARN}40`}`,
+                        borderRadius: 4,
+                        cursor: "pointer",
+                        textTransform: "uppercase",
+                        touchAction: "manipulation",
+                        flexShrink: 0,
+                      }}
+                    >
+                      {unavail ? "↺ Undo" : "Unavailable"}
+                    </button>
+                  )}
                 </div>
               </div>
             );
@@ -627,21 +734,30 @@ export default function WavePickScreen({ wave, location, onComplete, onBack }) {
         </div>
         <button
           onClick={onTapComplete}
-          disabled={completing || totalPicked === 0}
+          disabled={completing || (totalPicked === 0 && unavailableItemIds.size === 0)}
           style={{
             padding: "10px 18px",
-            background: totalPicked === 0 ? "#334155" : totalPicked < totalNeed ? WARN : ACCENT,
+            background:
+              totalPicked === 0 && unavailableItemIds.size === 0
+                ? "#334155"
+                : pendingRows > 0
+                  ? WARN
+                  : ACCENT,
             color: "#0f172a",
             fontSize: 14,
             fontWeight: 700,
             border: "none",
             borderRadius: 6,
-            cursor: completing || totalPicked === 0 ? "default" : "pointer",
+            cursor: completing ? "default" : "pointer",
             opacity: completing ? 0.6 : 1,
             touchAction: "manipulation",
           }}
         >
-          {completing ? "Completing..." : totalPicked < totalNeed ? `Complete Partial` : `Complete Wave`}
+          {completing
+            ? "Completing..."
+            : pendingRows > 0
+              ? `Complete Partial`
+              : `Complete & Ship`}
         </button>
       </div>
     </div>
