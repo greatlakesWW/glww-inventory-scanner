@@ -37,13 +37,17 @@ export default async function handler(req, res) {
   }
 
   try {
-    // We filter on t.status = 'SalesOrd:B' (Pending Fulfillment). Every
-    // line on a Pending SO is unfulfilled by definition, so there's no
+    // We filter on t.status = 'B' (Pending Fulfillment). Every line
+    // on a Pending SO is unfulfilled by definition, so there's no
     // need to compute (quantity - quantityfulfilled) — and we couldn't
     // anyway, because transactionline.quantityfulfilled is NOT_EXPOSED
     // to SuiteQL's SEARCH channel in this account. If we ever need to
     // list Partially Fulfilled SOs too, that's the point to pivot to
     // the REST Record API, same as api/transfer-orders/[id].js does.
+    //
+    // SO transactionline.quantity comes back NEGATIVE from SuiteQL
+    // (inventory-reducing entries), so we ABS() everywhere it's used
+    // for display or allocation logic.
     const query = `
       SELECT
         t.id AS id,
@@ -51,7 +55,7 @@ export default async function handler(req, res) {
         t.trandate AS tran_date,
         t.entity AS entity_id,
         BUILTIN.DF(t.entity) AS customer_name,
-        SUM(tl.quantity) AS remaining_qty,
+        SUM(ABS(tl.quantity)) AS remaining_qty,
         COUNT(tl.id) AS line_count
       FROM transaction t
       INNER JOIN transactionline tl ON tl.transaction = t.id
@@ -60,7 +64,7 @@ export default async function handler(req, res) {
         AND tl.mainline = 'F'
         AND tl.location = ${locationId}
         AND tl.itemtype IN ('InvtPart', 'Assembly', 'Kit')
-        AND tl.quantity > 0
+        AND ABS(tl.quantity) > 0
       GROUP BY t.id, t.tranid, t.trandate, t.entity
       ORDER BY t.trandate ASC, t.id ASC
     `;

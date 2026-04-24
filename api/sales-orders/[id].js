@@ -59,6 +59,8 @@ export default async function handler(req, res) {
     // unfulfilled, so qty_remaining == qty_ordered here. If support for
     // Partially Fulfilled SOs is added later, swap this query for a
     // REST Record API fetch so quantityFulfilled becomes available.
+    //
+    // SO transactionline.quantity is stored NEGATIVE; ABS() for display.
     const lineRows = await runSuiteQL(`
       SELECT
         tl.id AS line_id,
@@ -67,14 +69,14 @@ export default async function handler(req, res) {
         item.itemid AS sku,
         item.displayname AS display_name,
         item.upccode AS upc,
-        tl.quantity AS qty_ordered
+        ABS(tl.quantity) AS qty_ordered
       FROM transactionline tl
       JOIN item ON item.id = tl.item
       WHERE tl.transaction = ${soId}
         AND tl.mainline = 'F'
         AND tl.location = ${locationId}
         AND tl.itemtype IN ('InvtPart', 'Assembly', 'Kit')
-        AND tl.quantity > 0
+        AND ABS(tl.quantity) > 0
       ORDER BY tl.linesequencenumber ASC
     `);
 
