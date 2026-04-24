@@ -4,7 +4,8 @@ import { S, FONT, ANIMATIONS, mono, Logo } from "./shared";
 const modules = [
   { id: "inventory-count", name: "Inventory Count", subtitle: "Count & adjust inventory", accent: "#3b82f6", icon: "▦" },
   { id: "pick-transfer-orders", name: "Pick Transfer Orders", subtitle: "Outbound TO picking", accent: "#6366f1", icon: "✓" },
-  { id: "smart-fulfillment", name: "Smart Fulfillment", subtitle: "Wave pick Shopify orders", accent: "#22c55e", icon: "⇢" },
+  { id: "pick-sales-orders", name: "Pick Sales Orders", subtitle: "Wave pick open SOs", accent: "#22c55e", icon: "🛒" },
+  { id: "smart-fulfillment", name: "Smart Fulfillment", subtitle: "Wave pick Shopify orders", accent: "#0ea5e9", icon: "⇢" },
   { id: "transfer-orders", name: "Transfer Orders", subtitle: "Move between locations", accent: "#7c3aed", icon: "⇄" },
   { id: "bin-transfer", name: "Bin Transfer", subtitle: "Move items between bins", accent: "#14b8a6", icon: "⇋" },
   { id: "item-receipts", name: "Item Receipts", subtitle: "Receive purchase orders", accent: "#f59e0b", icon: "↓" },
