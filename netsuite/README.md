@@ -10,9 +10,10 @@ Precondition for the working path: the source IF must be `shipStatus=C` (Shipped
 
 ## Files
 
-| File | Purpose |
-|---|---|
-| `receiveTransferOrder.js` | Creates an Item Receipt against a TO. Called by `api/transfer-orders/[id]/fulfill.js` after the Item Fulfillment succeeds. |
+| File | Purpose | Env var pointing at it |
+|---|---|---|
+| `receiveTransferOrder.js` | TO picker flow — creates IF and IR for a Transfer Order. | `NS_RESTLET_RECEIVE_TO_URL` |
+| `fulfillSalesOrder.js` | SO wave picker — creates IF for a Sales Order. Deliberately separate so SO changes can't regress the TO path. | `NS_RESTLET_FULFILL_SO_URL` |
 
 ---
 
@@ -75,11 +76,30 @@ Once the env var is set and the deploy is green, you can do a quick sanity test 
 
 Or simpler: complete a pick end-to-end in the app. If the RESTlet is wired correctly you'll see the green "TO complete" card with both an IF and IR id. If it isn't, the app shows the amber "Receipt pending" stuck card and the Vercel function logs will include either "`NS_RESTLET_RECEIVE_TO_URL not set`" or the RESTlet's response body.
 
-## Updating the RESTlet later
+---
+
+## Deploying `fulfillSalesOrder.js`
+
+Same five-step pattern as above, but with its own script record and deployment so changes to it can't regress the TO flow:
+
+1. **Upload file** — File Cabinet → SuiteScripts → Add File → `fulfillSalesOrder.js`.
+2. **Create Script record** — Customization → Scripting → Scripts → New → pick the file → Create Script Record.
+   - **Name:** `SO Wave Pick - Fulfill Sales Order`
+   - **ID:** `_sowave_fulfill_sales_order`
+3. **Create Deployment** — from the Script record:
+   - **Title:** `SO Wave Pick - Fulfill Sales Order Deployment`
+   - **ID:** `_sowave_fulfill_sales_order_dep`
+   - **Status:** Released
+   - **Log Level:** Audit
+   - **Audience → Roles:** same TBA role as the TO RESTlet.
+4. **Copy External URL** from the Deployment.
+5. **Set env var on Vercel** — add `NS_RESTLET_FULFILL_SO_URL` with that URL, then redeploy.
+
+## Updating a RESTlet later
 
 If the logic needs to change:
-1. Edit `receiveTransferOrder.js` in this repo
-2. In NS, go to the **File Cabinet** entry for the file
+1. Edit the file in this repo
+2. In NS, go to the **File Cabinet** entry for that file
 3. Click **Edit** → **Upload** and select the updated file → Save
 
 No new deployment needed; the updated file is picked up on the next invocation. Keep the repo and the File Cabinet in sync so the committed code is the source of truth.

@@ -15,7 +15,7 @@ import {
 //   3. Walk SOs oldest-first. For each SO, pull its unfulfilled lines
 //      at the wave's source location and allocate from the pool.
 //   4. For each SO with a non-empty allocation, call the RESTlet
-//      action=fulfillSO. setShipped=true only if the allocation
+//      fulfillSalesOrder RESTlet. setShipped=true only if the allocation
 //      covered every remaining line at this location.
 //   5. On any success, delete the wave session (releases SO locks).
 //      Per-SO results are returned so the client can show the
@@ -42,9 +42,15 @@ export default async function handler(req, res) {
   try { config = getSuiteQLConfig(); }
   catch (e) { return res.status(e.status || 500).json({ error: e.message }); }
 
-  const restletUrl = process.env.NS_RESTLET_RECEIVE_TO_URL;
+  // Deliberately separate from the TO RESTlet. If the env var isn't
+  // set, fail fast — no fallback to the TO RESTlet that could mask a
+  // misconfiguration and accidentally route SO traffic through the TO
+  // deployment.
+  const restletUrl = process.env.NS_RESTLET_FULFILL_SO_URL;
   if (!restletUrl) {
-    return res.status(500).json({ error: "NS_RESTLET_RECEIVE_TO_URL is not configured" });
+    return res.status(500).json({
+      error: "NS_RESTLET_FULFILL_SO_URL is not configured. Deploy netsuite/fulfillSalesOrder.js — see netsuite/README.md.",
+    });
   }
 
   const session = await getWaveSession(sessionId);
@@ -198,7 +204,6 @@ export default async function handler(req, res) {
 
     const setShipped = short.length === 0;
     const body = {
-      action: "fulfillSO",
       salesOrderId: hdr.id,
       setShipped,
       lines,

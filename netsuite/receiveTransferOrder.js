@@ -120,36 +120,30 @@ define(['N/record', 'N/search', 'N/runtime', 'N/log'], function (record, search,
     return probes;
   }
 
-  // ─── Production path: TO/SO → IF ───────────────────────────────
+  // ─── Production path: TO → IF ──────────────────────────────────
   //
   // specByItemId[itemId] = { totalQty, bins: [{binId, qty}, ...] }
   //
-  // Works for both Transfer Order → Item Fulfillment and
-  // Sales Order → Item Fulfillment. The REST `!transform/itemFulfillment`
-  // endpoint pre-populates each line's inventoryDetail with an NS-chosen
-  // auto-allocation and treats it as static — appending ours via REST
-  // produces "total inventory detail quantity must be N" or
-  // "static sublist" errors. SuiteScript's dynamic record API lets us
-  // remove the pre-populated assignments before adding ours.
+  // The REST `!transform/itemFulfillment` endpoint pre-populates each
+  // line's inventoryDetail with an NS-chosen auto-allocation and treats
+  // it as static — appending ours via REST results in either "total
+  // inventory detail quantity must be N" or "static sublist" errors.
+  // SuiteScript's dynamic record API lets us remove the pre-populated
+  // assignments before adding ours, sidestepping that trap.
   //
-  // setShipped=true marks the IF shipstatus=C in the same save.
-  //   - TO fulfill: always true (the TO must flip to "Pending Receipt"
-  //     so the subsequent TO→IR transform is legal).
-  //   - SO fulfill: caller-controlled — true only when the picker
-  //     covered every remaining line, so partial fulfillments leave
-  //     shipstatus="A" (Picked) for a human to finalize.
-  function createFulfillment(fromType, sourceId, specByItemId, opts) {
-    var setShipped = opts && opts.setShipped !== false; // default true
-
+  // We also set shipstatus=C (Shipped) in the same save so the TO flips
+  // to Pending Receipt and the subsequent TO→IR transform is legal —
+  // avoids a separate REST PATCH that had been failing silently.
+  function createFulfillment(toId, specByItemId) {
     var ff = record.transform({
-      fromType: fromType,
-      fromId: sourceId,
+      fromType: record.Type.TRANSFER_ORDER,
+      fromId: toId,
       toType: record.Type.ITEM_FULFILLMENT,
       isDynamic: true,
     });
 
     var lineCount = ff.getLineCount({ sublistId: 'item' });
-    log.audit({ title: 'fulfill.sublistSize', details: { fromType: fromType, sourceId: sourceId, lineCount: lineCount } });
+    log.audit({ title: 'fulfillTransferOrder.sublistSize', details: lineCount });
 
     var touched = 0;
     for (var i = 0; i < lineCount; i++) {
@@ -179,12 +173,6 @@ define(['N/record', 'N/search', 'N/runtime', 'N/log'], function (record, search,
           invDetail.commitLine({ sublistId: 'inventoryassignment' });
         }
 
-        // Mark the line's spec consumed so a second line carrying the
-        // same itemId (kits, lots, multi-location SO lines) doesn't
-        // double-claim the same picked bin allocation.
-        spec.totalQty = 0;
-        spec.bins = [];
-
         touched++;
       } else {
         ff.setCurrentSublistValue({ sublistId: 'item', fieldId: 'itemreceive', value: false });
@@ -197,30 +185,29 @@ define(['N/record', 'N/search', 'N/runtime', 'N/log'], function (record, search,
       throw Error('No fulfillment lines matched. Expected itemId one of: ' + Object.keys(specByItemId).join(', '));
     }
 
-    if (setShipped) {
-      try {
-        ff.setValue({ fieldId: 'shipstatus', value: 'C' });
-      } catch (e) {
-        log.debug({ title: 'fulfill.shipstatusSetValueFailed', details: e.message });
-      }
+    // Advance to Shipped in the same save. If the field is read-only in
+    // this account we retry after save via submitFields.
+    try {
+      ff.setValue({ fieldId: 'shipstatus', value: 'C' });
+    } catch (e) {
+      log.debug({ title: 'fulfillTransferOrder.shipstatusSetValueFailed', details: e.message });
     }
 
     var fulfillmentId = ff.save({ enableSourcing: true, ignoreMandatoryFields: false });
 
-    if (setShipped) {
-      try {
-        var cur = search.lookupFields({ type: record.Type.ITEM_FULFILLMENT, id: fulfillmentId, columns: ['shipstatus'] });
-        var curStatus = Array.isArray(cur.shipstatus) && cur.shipstatus[0] ? cur.shipstatus[0].value : cur.shipstatus;
-        if (curStatus !== 'C') {
-          record.submitFields({
-            type: record.Type.ITEM_FULFILLMENT,
-            id: fulfillmentId,
-            values: { shipstatus: 'C' },
-          });
-        }
-      } catch (e) {
-        log.error({ title: 'fulfill.shipstatusForceFailed', details: e.message });
+    // If setValue didn't take, force it via submitFields.
+    try {
+      var cur = search.lookupFields({ type: record.Type.ITEM_FULFILLMENT, id: fulfillmentId, columns: ['shipstatus'] });
+      var curStatus = Array.isArray(cur.shipstatus) && cur.shipstatus[0] ? cur.shipstatus[0].value : cur.shipstatus;
+      if (curStatus !== 'C') {
+        record.submitFields({
+          type: record.Type.ITEM_FULFILLMENT,
+          id: fulfillmentId,
+          values: { shipstatus: 'C' },
+        });
       }
+    } catch (e) {
+      log.error({ title: 'fulfillTransferOrder.shipstatusForceFailed', details: e.message });
     }
 
     return { fulfillmentId: String(fulfillmentId), touched: touched };
@@ -307,68 +294,44 @@ define(['N/record', 'N/search', 'N/runtime', 'N/log'], function (record, search,
       };
     }
 
-    // Roll arbitrary line shapes into { itemId: { totalQty, bins[] } }.
-    // Accept either aggregated lines { itemId, bins:[{binId,quantity}] }
-    // or flat bin rows { itemId, binId, quantity }.
-    function buildSpec(linesArr) {
-      var spec = {};
-      for (var fi = 0; fi < linesArr.length; fi++) {
-        var L = linesArr[fi];
+    if (action === 'fulfill') {
+      if (lines.length === 0) { throw Error('lines[] must be non-empty'); }
+      // Accept either aggregated lines `{ itemId, quantity, bins:[{binId, quantity}] }`
+      // or flat bin rows `{ itemId, quantity, binId }` — roll both up
+      // by itemId so repeat rows for the same item merge cleanly.
+      var specByItemId = {};
+      for (var fi = 0; fi < lines.length; fi++) {
+        var L = lines[fi];
         var iid = L.itemId != null ? String(L.itemId) : '';
         if (!iid) { continue; }
-        if (!spec[iid]) { spec[iid] = { totalQty: 0, bins: [] }; }
+        if (!specByItemId[iid]) { specByItemId[iid] = { totalQty: 0, bins: [] }; }
+
         if (Array.isArray(L.bins)) {
           for (var bi = 0; bi < L.bins.length; bi++) {
             var row = L.bins[bi];
             var rqty = Number(row.quantity) || 0;
             if (!row.binId || rqty <= 0) { continue; }
-            spec[iid].bins.push({ binId: String(row.binId), qty: rqty });
-            spec[iid].totalQty += rqty;
+            specByItemId[iid].bins.push({ binId: String(row.binId), qty: rqty });
+            specByItemId[iid].totalQty += rqty;
           }
         } else {
           var q = Number(L.quantity) || 0;
           if (q > 0 && L.binId) {
-            spec[iid].bins.push({ binId: String(L.binId), qty: q });
-            spec[iid].totalQty += q;
+            specByItemId[iid].bins.push({ binId: String(L.binId), qty: q });
+            specByItemId[iid].totalQty += q;
           }
         }
       }
-      return spec;
-    }
-
-    if (action === 'fulfill') {
-      if (lines.length === 0) { throw Error('lines[] must be non-empty'); }
-      var specByItemId = buildSpec(lines);
       if (Object.keys(specByItemId).length === 0) {
         throw Error('fulfill: no lines with itemId + bin data');
       }
-      var ffResult = createFulfillment(record.Type.TRANSFER_ORDER, toId, specByItemId, { setShipped: true });
+      var ffResult = createFulfillment(toId, specByItemId);
       log.audit({ title: 'fulfillTransferOrder.created', details: ffResult });
       return {
         status: 'fulfilled',
         fulfillmentId: ffResult.fulfillmentId,
         linesFulfilled: ffResult.touched,
         transferOrderId: toId,
-      };
-    }
-
-    if (action === 'fulfillso') {
-      var soId = body && body.salesOrderId ? String(body.salesOrderId) : '';
-      if (!soId) { throw Error('salesOrderId is required for fulfillSO'); }
-      if (lines.length === 0) { throw Error('lines[] must be non-empty'); }
-      var soSpec = buildSpec(lines);
-      if (Object.keys(soSpec).length === 0) {
-        throw Error('fulfillSO: no lines with itemId + bin data');
-      }
-      var soShipped = !!(body && body.setShipped);
-      var soResult = createFulfillment(record.Type.SALES_ORDER, soId, soSpec, { setShipped: soShipped });
-      log.audit({ title: 'fulfillSalesOrder.created', details: { soId: soId, setShipped: soShipped, result: soResult } });
-      return {
-        status: 'fulfilled',
-        fulfillmentId: soResult.fulfillmentId,
-        linesFulfilled: soResult.touched,
-        salesOrderId: soId,
-        shipped: soShipped,
       };
     }
 
