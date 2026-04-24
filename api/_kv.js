@@ -52,3 +52,44 @@ export async function deleteSession(session) {
     kv.del(KEY_ID_TO_TO(session.sessionId)),
   ]);
 }
+
+// ═══════════════════════════════════════════════════════════
+// Wave-pick sessions (Sales Orders — many SOs per session)
+//
+// Shape differs from TO sessions because a wave holds an array of
+// soIds that can grow/shrink during picking:
+//   session:wave:{sessionId} → full session JSON
+//   session:so-lock:{soId}   → sessionId that currently owns this SO
+//
+// The SO lock prevents two pickers from accidentally waving the same
+// SO at once, and powers takeover/warning UX.
+// ═══════════════════════════════════════════════════════════
+export const KEY_WAVE_SESSION = (sessionId) => `session:wave:${sessionId}`;
+export const KEY_SO_LOCK      = (soId)      => `session:so-lock:${soId}`;
+
+export const newWaveSessionId = () => `wave_${crypto.randomBytes(8).toString("hex")}`;
+
+export async function getWaveSession(sessionId) {
+  return await kv.get(KEY_WAVE_SESSION(sessionId));
+}
+
+export async function writeWaveSession(session) {
+  const ttl = getSessionTtlSeconds();
+  const writes = [kv.set(KEY_WAVE_SESSION(session.sessionId), session, { ex: ttl })];
+  for (const soId of session.soIds || []) {
+    writes.push(kv.set(KEY_SO_LOCK(soId), session.sessionId, { ex: ttl }));
+  }
+  await Promise.all(writes);
+}
+
+export async function deleteWaveSession(session) {
+  const deletes = [kv.del(KEY_WAVE_SESSION(session.sessionId))];
+  for (const soId of session.soIds || []) {
+    deletes.push(kv.del(KEY_SO_LOCK(soId)));
+  }
+  await Promise.all(deletes);
+}
+
+export async function getSOLock(soId) {
+  return await kv.get(KEY_SO_LOCK(soId));
+}
