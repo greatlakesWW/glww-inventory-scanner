@@ -64,9 +64,13 @@ export default function SOListScreen({ location, onStartPick, onBack }) {
   const [pickerName, setPickerName] = useState(() => loadSession(PICKER_NAME_KEY) || "");
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState(null);
+  const [nameFocused, setNameFocused] = useState(false);
   const scanInputRef = useRef(null);
 
-  useScanRefocus(scanInputRef, !loading && !starting);
+  // Don't auto-refocus the scan box while the picker is typing their
+  // name; the useScanRefocus click handler would otherwise steal focus
+  // every time they touch the name input.
+  useScanRefocus(scanInputRef, !loading && !starting && !nameFocused);
 
   useEffect(() => {
     if (!location?.id) return;
@@ -191,6 +195,8 @@ export default function SOListScreen({ location, onStartPick, onBack }) {
             <input
               value={pickerName}
               onChange={(e) => setPickerName(e.target.value)}
+              onFocus={() => setNameFocused(true)}
+              onBlur={() => setNameFocused(false)}
               placeholder="Your name"
               style={{
                 width: "100%",
