@@ -62,7 +62,7 @@ export default async function handler(req, res) {
         AND tl.location = ${locationId}
         AND tl.itemtype IN ('InvtPart', 'Assembly', 'Kit')
         AND ABS(tl.quantity) > 0
-      ORDER BY t.trandate ASC, t.id ASC
+      ORDER BY t.trandate DESC, t.id DESC
     `;
     const { items } = await runSuiteQL(headerQuery);
 
