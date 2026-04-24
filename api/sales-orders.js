@@ -56,7 +56,7 @@ export default async function handler(req, res) {
       FROM transaction t
       INNER JOIN transactionline tl ON tl.transaction = t.id
       WHERE t.type = 'SalesOrd'
-        AND t.status = 'SalesOrd:B'
+        AND t.status = 'B'
         AND tl.mainline = 'F'
         AND tl.location = ${locationId}
         AND tl.itemtype IN ('InvtPart', 'Assembly', 'Kit')
