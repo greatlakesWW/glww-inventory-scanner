@@ -53,7 +53,12 @@ export default async function handler(req, res) {
     }
     const hdr = headerRows.items[0];
 
-    // ─── Lines at this location ───
+    // SuiteQL's SEARCH channel doesn't expose transactionline.quantityfulfilled
+    // in this account (same constraint as api/transfer-orders/[id].js hit).
+    // We only list Pending Fulfillment SOs, where every line is
+    // unfulfilled, so qty_remaining == qty_ordered here. If support for
+    // Partially Fulfilled SOs is added later, swap this query for a
+    // REST Record API fetch so quantityFulfilled becomes available.
     const lineRows = await runSuiteQL(`
       SELECT
         tl.id AS line_id,
@@ -62,16 +67,14 @@ export default async function handler(req, res) {
         item.itemid AS sku,
         item.displayname AS display_name,
         item.upccode AS upc,
-        tl.quantity AS qty_ordered,
-        COALESCE(tl.quantityfulfilled, 0) AS qty_fulfilled,
-        (tl.quantity - COALESCE(tl.quantityfulfilled, 0)) AS qty_remaining
+        tl.quantity AS qty_ordered
       FROM transactionline tl
       JOIN item ON item.id = tl.item
       WHERE tl.transaction = ${soId}
         AND tl.mainline = 'F'
         AND tl.location = ${locationId}
         AND tl.itemtype IN ('InvtPart', 'Assembly', 'Kit')
-        AND (tl.quantity - COALESCE(tl.quantityfulfilled, 0)) > 0
+        AND tl.quantity > 0
       ORDER BY tl.linesequencenumber ASC
     `);
 
@@ -109,6 +112,7 @@ export default async function handler(req, res) {
 
     const shapedLines = lines.map((l) => {
       const itemId = l.item_id != null ? String(l.item_id) : null;
+      const qtyOrdered = Number(l.qty_ordered) || 0;
       return {
         lineId: l.line_id != null ? String(l.line_id) : null,
         lineNumber: l.line_number != null ? Number(l.line_number) : null,
@@ -116,9 +120,9 @@ export default async function handler(req, res) {
         sku: l.sku || null,
         description: l.display_name || null,
         upc: l.upc || null,
-        qtyOrdered: Number(l.qty_ordered) || 0,
-        qtyAlreadyFulfilled: Number(l.qty_fulfilled) || 0,
-        qtyRemaining: Number(l.qty_remaining) || 0,
+        qtyOrdered,
+        qtyAlreadyFulfilled: 0,
+        qtyRemaining: qtyOrdered,
         binAvailability: itemId ? (binsByItem[itemId] || []) : [],
       };
     });

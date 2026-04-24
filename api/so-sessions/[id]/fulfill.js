@@ -105,19 +105,21 @@ export default async function handler(req, res) {
     orderDate: r.trandate || null,
   }));
 
+  // quantityfulfilled is NOT_EXPOSED to SuiteQL's SEARCH channel in
+  // this account (see api/sales-orders.js). All SOs in this wave are
+  // Pending Fulfillment (filtered at list time), so qty_remaining ==
+  // qty_ordered for every line here.
   const { items: lineRows } = await runSuiteQL(`
     SELECT
       tl.transaction AS so_id,
       tl.item AS item_id,
-      tl.quantity AS qty_ordered,
-      COALESCE(tl.quantityfulfilled, 0) AS qty_fulfilled,
-      (tl.quantity - COALESCE(tl.quantityfulfilled, 0)) AS qty_remaining
+      tl.quantity AS qty_ordered
     FROM transactionline tl
     WHERE tl.transaction IN (${soIdList.join(",")})
       AND tl.mainline = 'F'
       AND tl.location = ${locationId}
       AND tl.itemtype IN ('InvtPart', 'Assembly', 'Kit')
-      AND (tl.quantity - COALESCE(tl.quantityfulfilled, 0)) > 0
+      AND tl.quantity > 0
     ORDER BY tl.transaction, tl.linesequencenumber ASC
   `);
   const linesBySO = {};
@@ -125,7 +127,7 @@ export default async function handler(req, res) {
     const sid = String(r.so_id);
     (linesBySO[sid] ||= []).push({
       itemId: String(r.item_id),
-      qtyRemaining: Number(r.qty_remaining) || 0,
+      qtyRemaining: Number(r.qty_ordered) || 0,
     });
   }
 
