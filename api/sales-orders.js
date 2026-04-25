@@ -47,13 +47,17 @@ export default async function handler(req, res) {
     // Pending Fulfillment (t.status='B') guarantees qty_fulfilled=0,
     // so we don't need quantityfulfilled (which is NOT_EXPOSED to
     // SuiteQL anyway). SO quantity is stored negative — ABS() it.
+    // custbody_fa_channel_order is the Shopify order number stamped on
+    // SOs imported via the NetSuite Connector. Pickers can scan it as
+    // an alias for the NetSuite tranId.
     const headerQuery = `
       SELECT DISTINCT
         t.id AS id,
         t.tranid AS tran_id,
         t.trandate AS tran_date,
         t.entity AS entity_id,
-        BUILTIN.DF(t.entity) AS customer_name
+        BUILTIN.DF(t.entity) AS customer_name,
+        t.custbody_fa_channel_order AS shopify_order_number
       FROM transaction t
       INNER JOIN transactionline tl ON tl.transaction = t.id
       WHERE t.type = 'SalesOrd'
@@ -107,6 +111,7 @@ export default async function handler(req, res) {
       return {
         id: String(r.id),
         tranId: r.tran_id || null,
+        shopifyOrderNumber: r.shopify_order_number != null ? String(r.shopify_order_number) : null,
         orderDate: r.tran_date || null,
         customerId: r.entity_id != null ? String(r.entity_id) : null,
         customerName: r.customer_name || null,

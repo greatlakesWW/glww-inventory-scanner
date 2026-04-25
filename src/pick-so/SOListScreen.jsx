@@ -92,11 +92,20 @@ export default function SOListScreen({ location, onStartPick, onBack }) {
     return () => { cancelled = true; };
   }, [location?.id]);
 
+  // Lookup map covers three scan formats:
+  //   - NetSuite tranId (e.g. "SO2707")
+  //   - NetSuite internal id (e.g. "529684")
+  //   - Shopify order number (e.g. "25333" or "#25333") — stamped on
+  //     each Connector-imported SO under custbody_fa_channel_order.
+  // Keys are normalised: uppercased and stripped of leading "#" so
+  // "25333" and "#25333" both match.
+  const normalize = (raw) => String(raw || "").trim().toUpperCase().replace(/^#/, "");
   const orderByTran = useMemo(() => {
     const m = {};
     for (const o of orders) {
-      if (o.tranId) m[String(o.tranId).toUpperCase()] = o;
-      m[String(o.id)] = o;
+      if (o.tranId) m[normalize(o.tranId)] = o;
+      m[normalize(o.id)] = o;
+      if (o.shopifyOrderNumber) m[normalize(o.shopifyOrderNumber)] = o;
     }
     return m;
   }, [orders]);
@@ -110,7 +119,7 @@ export default function SOListScreen({ location, onStartPick, onBack }) {
   };
 
   const handleScan = (raw) => {
-    const val = String(raw || "").trim().toUpperCase();
+    const val = normalize(raw);
     if (!val) return;
     const hit = orderByTran[val];
     if (!hit) { beepWarn(); setStartError(`No open SO matches "${raw}"`); return; }
@@ -319,10 +328,26 @@ export default function SOListScreen({ location, onStartPick, onBack }) {
                       {picked ? "✓" : ""}
                     </div>
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                         <span style={{ fontSize: 14, fontWeight: 700, color: "#e2e8f0", ...mono }}>
                           {o.tranId || `#${o.id}`}
                         </span>
+                        {o.shopifyOrderNumber && (
+                          <span
+                            style={{
+                              fontSize: 10,
+                              color: "#94a3b8",
+                              padding: "1px 6px",
+                              background: "rgba(148,163,184,0.10)",
+                              border: "1px solid rgba(148,163,184,0.25)",
+                              borderRadius: 10,
+                              ...mono,
+                            }}
+                            title="Shopify order number — scannable"
+                          >
+                            #{o.shopifyOrderNumber}
+                          </span>
+                        )}
                         <LockBadge order={o} />
                       </div>
                       <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
