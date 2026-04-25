@@ -268,14 +268,19 @@ export default function WavePickScreen({ wave, location, onComplete, onBack }) {
   useScanRefocus(binScanRef, !currentBin && !completing && !result);
   useScanRefocus(itemScanRef, !!currentBin && !completing && !result);
 
-  // ─── Manual +1 (no-UPC items, scanner issues, etc.) ──────────
-  // Items like laces don't carry a UPC. Picker taps +1 on the row,
-  // confirms, and we record the scan against the item's primary bin
-  // (first bin from binAvailability, which the detail endpoint sorts
-  // ascending). If there's no bin data we can't record the scan, so
-  // the button is disabled.
+  // ─── Manual +1 — three-step gauntlet ──────────────────────────
+  // Tapping a pick-list row goes through THREE dialogs before the
+  // qty increments. The friction is intentional — scanning is one
+  // beep, manual is three taps. Picker reaches for the scanner unless
+  // they genuinely can't (missing UPC, broken scanner, etc.).
+  //
+  // Steps:
+  //   1. Identify   — "Is this the item you want to manually check in?"
+  //   2. Confirm    — "Mark this item as picked?"
+  //   3. Acknowledge — "1 item added" (success alert)
   const handleManualAdd = useCallback(async (row) => {
     const label = row.meta.sku || `#${row.itemId}`;
+    const description = row.meta.description ? ` — ${row.meta.description}` : "";
     const primary = row.bins?.[0];
     const binId = primary?.binId || currentBin?.binId || null;
     const binNumber = primary?.binNumber || currentBin?.binNumber || null;
@@ -284,13 +289,21 @@ export default function WavePickScreen({ wave, location, onComplete, onBack }) {
       showBanner("warn", `No bin data for ${label} — scan a bin first`);
       return;
     }
-    if (!confirm(
-      `Mark one ${label} as picked from ${binNumber}?\n\nOnly use this if the item can't be scanned (missing UPC, etc.).`
-    )) return;
+
+    // Step 1 — identify
+    if (!confirm(`Is this the item you want to manually check in?\n\n${label}${description}`)) {
+      return;
+    }
+    // Step 2 — confirm action
+    if (!confirm(`Mark this item as picked?\n\n${label} from ${binNumber}\n\nScanning is faster — only manually check in items that can't be scanned.`)) {
+      return;
+    }
+
     try {
       await recordScan({ itemId: row.itemId, binId, qty: 1 });
       beepOk();
-      showBanner("ok", `+1 ${label} (manual)`, 1200);
+      // Step 3 — acknowledge
+      alert(`✓ 1 ${label} added (manual).`);
     } catch (e) {
       beepWarn();
       showBanner("err", e.message || "Manual add failed");
@@ -657,15 +670,19 @@ export default function WavePickScreen({ wave, location, onComplete, onBack }) {
               : done
                 ? "rgba(30,41,59,0.6)"
                 : `${ACCENT}06`;
+            const tappable = !done && !unavail;
             return (
               <div
                 key={row.itemId}
+                onClick={tappable ? () => handleManualAdd(row) : undefined}
                 style={{
                   ...S.card,
                   padding: "10px 12px",
                   border: `1px solid ${borderColor}`,
                   background: bg,
                   opacity: done && !unavail ? 0.5 : 1,
+                  cursor: tappable ? "pointer" : "default",
+                  touchAction: "manipulation",
                 }}
               >
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
@@ -712,30 +729,9 @@ export default function WavePickScreen({ wave, location, onComplete, onBack }) {
                       ? row.bins.map((b) => `${b.binNumber}(${b.qtyOnHand})`).join("  ")
                       : "no stock at this location"}
                   </div>
-                  {!done && !unavail && (
-                    <button
-                      onClick={() => handleManualAdd(row)}
-                      title="Manual +1 (for items without UPC)"
-                      style={{
-                        padding: "4px 10px",
-                        fontSize: 10,
-                        fontWeight: 700,
-                        letterSpacing: 0.3,
-                        color: ACCENT,
-                        background: `${ACCENT}10`,
-                        border: `1px solid ${ACCENT}40`,
-                        borderRadius: 4,
-                        cursor: "pointer",
-                        touchAction: "manipulation",
-                        flexShrink: 0,
-                      }}
-                    >
-                      +1 Manual
-                    </button>
-                  )}
                   {!done && (
                     <button
-                      onClick={() => handleToggleUnavailable(row)}
+                      onClick={(e) => { e.stopPropagation(); handleToggleUnavailable(row); }}
                       style={{
                         padding: "4px 10px",
                         fontSize: 10,
