@@ -11,7 +11,6 @@ import { S, FONT, ANIMATIONS, mono, Logo } from "./shared";
 const modules = [
   // Sales
   { id: "pick-sales-orders",     name: "Pick Sales Orders",   subtitle: "Wave pick open SOs",          accent: "#22c55e", icon: "🛒", category: "sales" },
-  { id: "smart-fulfillment",     name: "Smart Fulfillment",    subtitle: "Wave pick Shopify orders",   accent: "#0ea5e9", icon: "⇢",  category: "sales" },
 
   // Transfers
   { id: "pick-transfer-orders",  name: "Pick Transfer Orders", subtitle: "Outbound TO picking",         accent: "#6366f1", icon: "✓",  category: "transfers" },

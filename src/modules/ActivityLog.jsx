@@ -7,7 +7,6 @@ import { queryLog, exportLogCSV, getLogCount, clearLog } from "../activityLog";
 // ═══════════════════════════════════════════════════════════
 const MODULE_OPTIONS = [
   { value: "", label: "All Modules" },
-  { value: "smart-fulfillment", label: "Smart Fulfillment" },
   { value: "transfer-orders", label: "Transfer Orders" },
   { value: "item-receipts", label: "Item Receipts" },
   { value: "inventory-count", label: "Inventory Count" },
@@ -18,12 +17,6 @@ const MODULE_OPTIONS = [
 
 const ACTION_OPTIONS = {
   "": [{ value: "", label: "All Actions" }, { value: "errors-only", label: "Errors Only" }],
-  "smart-fulfillment": [
-    { value: "", label: "All Actions" }, { value: "errors-only", label: "Errors Only" },
-    { value: "wave-built", label: "Wave Built" },
-    { value: "fulfillment-created", label: "Fulfillment Created" },
-    { value: "fulfillment-failed", label: "Fulfillment Failed" },
-  ],
   "transfer-orders": [
     { value: "", label: "All Actions" }, { value: "errors-only", label: "Errors Only" },
     { value: "to-fulfillment-created", label: "TO Fulfillment Created" },
