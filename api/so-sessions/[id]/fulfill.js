@@ -241,61 +241,44 @@ export default async function handler(req, res) {
       lines,
     };
 
-    try {
-      const auth = generateOAuthHeader("POST", restletBase, restletQp, config);
-      const resp = await fetch(restletUrl, {
-        method: "POST",
-        headers: { Authorization: auth, "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const text = await resp.text();
-      let data = null;
-      if (text) { try { data = JSON.parse(text); } catch { data = text; } }
-      if (!resp.ok || !data?.fulfillmentId) {
-        results.push({
-          soId: hdr.id,
-          tranId: hdr.tranId,
-          status: "error",
-          error: (typeof data === "object" && (data?.["o:errorDetails"]?.[0]?.detail || data?.error?.message || data?.message)) ||
-                 (typeof data === "string" ? data.slice(0, 300) : `RESTlet returned ${resp.status}`),
-          shortages: short,
-          fulfillmentId: null,
-          requestPayload: body,
-        });
-        continue;
-      }
-      results.push({
-        soId: hdr.id,
-        tranId: hdr.tranId,
-        status: setShipped ? "shipped" : "picked_partial",
-        fulfillmentId: String(data.fulfillmentId),
-        linesFulfilled: data.linesFulfilled || 0,
-        shortages: short,
-        unavailable: unavailableShort,
-      });
-    } catch (e) {
+    const result = await callRestletWithRetry({ restletUrl, restletBase, restletQp, config, body });
+    if (!result.ok) {
       results.push({
         soId: hdr.id,
         tranId: hdr.tranId,
         status: "error",
-        error: `RESTlet call threw: ${e.message}`,
+        error: result.error,
         shortages: short,
         unavailable: unavailableShort,
         fulfillmentId: null,
+        requestPayload: body,
       });
+      continue;
     }
+    results.push({
+      soId: hdr.id,
+      tranId: hdr.tranId,
+      status: setShipped ? "shipped" : "picked_partial",
+      fulfillmentId: String(result.data.fulfillmentId),
+      linesFulfilled: result.data.linesFulfilled || 0,
+      shortages: short,
+      unavailable: unavailableShort,
+    });
   }
 
   // ─── Shortage log (admin follow-up) ───────────────────────────
   // Anything the picker flagged unavailable is something a customer-
   // service person needs to act on — cancel the line, refund, offer a
-  // substitute, etc. Log to KV for 30 days under shortage:{ts}:{soId}
-  // so a future admin view (or email digest) can surface them.
+  // substitute, etc. Log to KV for 30 days under
+  //   shortage:{ts}:{soId}:{locationId}
+  // so a future admin view (or email digest) can surface them. Per
+  // H-6, the locationId suffix disambiguates the same SO being short
+  // at multiple warehouses on the same day.
   const SHORTAGE_LOG_TTL = 60 * 60 * 24 * 30;
   for (const r of results) {
     if (!r.unavailable || r.unavailable.length === 0) continue;
     try {
-      const key = `shortage:${Date.now()}:${r.soId}`;
+      const key = `shortage:${Date.now()}:${r.soId}:${session.locationId}`;
       await kv.set(
         key,
         {
@@ -340,4 +323,70 @@ export default async function handler(req, res) {
     results,
     waveShortages: Object.entries(shortagesBySO).map(([soId, short]) => ({ soId, short })),
   });
+}
+
+// ═══════════════════════════════════════════════════════════
+// H-2: Concurrent record.transform on the same SO from two locations
+// causes NetSuite to reject the second save with RCRD_HAS_BEEN_CHANGED
+// (optimistic concurrency). Catch that specific failure, wait briefly
+// to let the first transform commit, then retry once. Anything else —
+// auth, validation, RESTlet logic errors — bubbles up immediately.
+// ═══════════════════════════════════════════════════════════
+const CONTENTION_RETRY_DELAY_MS = 2500;
+
+function isContentionError(data, status) {
+  if (status >= 500) {
+    // Some account configurations surface RCRD_HAS_BEEN_CHANGED as a
+    // 500 with the code in the body; check the payload regardless.
+  }
+  const haystack = (() => {
+    if (typeof data === "string") return data;
+    if (data && typeof data === "object") {
+      try { return JSON.stringify(data); } catch { return ""; }
+    }
+    return "";
+  })();
+  if (!haystack) return false;
+  const upper = haystack.toUpperCase();
+  return upper.includes("RCRD_HAS_BEEN_CHANGED")
+      || upper.includes("RECORD HAS BEEN CHANGED")
+      || upper.includes("RECORD CONTENTION");
+}
+
+async function callRestletOnce({ restletUrl, restletBase, restletQp, config, body }) {
+  const auth = generateOAuthHeader("POST", restletBase, restletQp, config);
+  const resp = await fetch(restletUrl, {
+    method: "POST",
+    headers: { Authorization: auth, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const text = await resp.text();
+  let data = null;
+  if (text) { try { data = JSON.parse(text); } catch { data = text; } }
+  if (!resp.ok || !data?.fulfillmentId) {
+    const error = (typeof data === "object" && (data?.["o:errorDetails"]?.[0]?.detail || data?.error?.message || data?.message)) ||
+                  (typeof data === "string" ? data.slice(0, 300) : `RESTlet returned ${resp.status}`);
+    return { ok: false, status: resp.status, data, error };
+  }
+  return { ok: true, status: resp.status, data };
+}
+
+async function callRestletWithRetry(args) {
+  let attempt;
+  try {
+    attempt = await callRestletOnce(args);
+  } catch (e) {
+    return { ok: false, error: `RESTlet call threw: ${e.message}` };
+  }
+  if (attempt.ok) return attempt;
+  if (!isContentionError(attempt.data, attempt.status)) return attempt;
+  // Cross-location contention. Wait for the other transform to commit
+  // and retry once. Don't retry beyond once — if both transforms keep
+  // colliding the picker should see the error rather than wait forever.
+  await new Promise((r) => setTimeout(r, CONTENTION_RETRY_DELAY_MS));
+  try {
+    return await callRestletOnce(args);
+  } catch (e) {
+    return { ok: false, error: `RESTlet call threw on retry: ${e.message}` };
+  }
 }

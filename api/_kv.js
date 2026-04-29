@@ -58,14 +58,24 @@ export async function deleteSession(session) {
 //
 // Shape differs from TO sessions because a wave holds an array of
 // soIds that can grow/shrink during picking:
-//   session:wave:{sessionId} → full session JSON
-//   session:so-lock:{soId}   → sessionId that currently owns this SO
+//   session:wave:{sessionId}              → full session JSON
+//   session:so-lock:{soId}:{locationId}   → sessionId that currently
+//                                            owns this SO at this loc
 //
-// The SO lock prevents two pickers from accidentally waving the same
-// SO at once, and powers takeover/warning UX.
+// Lock keys are LOCATION-SCOPED so two pickers at different warehouses
+// can simultaneously pick different lines of the same SO. See
+// PRD-Location-Scoped-SO-Fulfillment.md.
+//
+// During the migration window we also tolerate the old un-scoped key
+// (`session:so-lock:{soId}`) so a wave that started before the deploy
+// completes cleanly. Remove the legacy fallback after 48h of clean
+// operation post-deploy (search for "LEGACY_LOCK").
 // ═══════════════════════════════════════════════════════════
 export const KEY_WAVE_SESSION = (sessionId) => `session:wave:${sessionId}`;
-export const KEY_SO_LOCK      = (soId)      => `session:so-lock:${soId}`;
+export const KEY_SO_LOCK = (soId, locationId) => `session:so-lock:${soId}:${locationId}`;
+// LEGACY_LOCK — pre-location-scoping format. Read-only fallback during
+// the 48h migration window so old in-flight waves complete cleanly.
+export const KEY_SO_LOCK_LEGACY = (soId) => `session:so-lock:${soId}`;
 
 export const newWaveSessionId = () => `wave_${crypto.randomBytes(8).toString("hex")}`;
 
@@ -75,21 +85,47 @@ export async function getWaveSession(sessionId) {
 
 export async function writeWaveSession(session) {
   const ttl = getSessionTtlSeconds();
+  const locationId = session.locationId != null ? String(session.locationId) : "";
+  if (!locationId) throw new Error("writeWaveSession: session.locationId is required for location-scoped locks");
   const writes = [kv.set(KEY_WAVE_SESSION(session.sessionId), session, { ex: ttl })];
   for (const soId of session.soIds || []) {
-    writes.push(kv.set(KEY_SO_LOCK(soId), session.sessionId, { ex: ttl }));
+    writes.push(kv.set(KEY_SO_LOCK(soId, locationId), session.sessionId, { ex: ttl }));
   }
   await Promise.all(writes);
 }
 
 export async function deleteWaveSession(session) {
+  const locationId = session.locationId != null ? String(session.locationId) : "";
   const deletes = [kv.del(KEY_WAVE_SESSION(session.sessionId))];
   for (const soId of session.soIds || []) {
-    deletes.push(kv.del(KEY_SO_LOCK(soId)));
+    if (locationId) deletes.push(kv.del(KEY_SO_LOCK(soId, locationId)));
+    // LEGACY_LOCK — clear any pre-deploy lock at the unscoped key so it
+    // can't strand the SO. Cheap; safe to remove with the read fallback.
+    deletes.push(kv.del(KEY_SO_LOCK_LEGACY(soId)));
   }
   await Promise.all(deletes);
 }
 
-export async function getSOLock(soId) {
-  return await kv.get(KEY_SO_LOCK(soId));
+// Returns the sessionId currently owning {soId, locationId}, or null.
+// Per H-4, falls back to the legacy un-scoped key if no scoped lock
+// exists; this catches in-flight waves that started before the deploy.
+export async function getSOLock(soId, locationId) {
+  if (!locationId) throw new Error("getSOLock: locationId is required");
+  const scoped = await kv.get(KEY_SO_LOCK(soId, locationId));
+  if (scoped) return scoped;
+  // LEGACY_LOCK — fall back to pre-deploy key. Remove this branch once
+  // the 48h migration window has passed.
+  return await kv.get(KEY_SO_LOCK_LEGACY(soId));
+}
+
+// Deletes both the scoped lock and the legacy un-scoped lock for an
+// SO. Used when an SO is removed from a wave or the wave is fulfilled.
+export async function deleteSOLock(soId, locationId) {
+  const ops = [];
+  if (locationId) ops.push(kv.del(KEY_SO_LOCK(soId, locationId)));
+  // LEGACY_LOCK — clean up pre-deploy keys so they don't strand the
+  // SO after the new code releases the scoped lock. Safe to remove
+  // alongside the read fallback above.
+  ops.push(kv.del(KEY_SO_LOCK_LEGACY(soId)));
+  await Promise.all(ops);
 }

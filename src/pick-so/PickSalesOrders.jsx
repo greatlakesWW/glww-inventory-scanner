@@ -34,6 +34,15 @@ export default function PickSalesOrders({ onBack }) {
         body: JSON.stringify({ pickerName, locationId, soIds }),
       });
       let data = await r.json();
+      // H-3: every requested SO has already been fulfilled at this
+      // location (a sibling-location wave shipped them while we were
+      // away). Mark the location done in the plan and bail.
+      if (r.status === 409 && data?.error === "already_fulfilled_at_location") {
+        const labels = (data.soIds || []).map((s) => s.tranId || `#${s.soId}`).join(", ");
+        alert(`Already fulfilled at ${locationName}.\n\n${labels || "These items"} were shipped from another location. Marking ${locationName} as done.`);
+        setPlanCompletionSignal((prev) => ({ locationId: String(locationId), n: prev.n + 1 }));
+        return;
+      }
       // Lock conflict — offer override for any wave that has no scans.
       if (r.status === 409 && data?.error === "locked" && Array.isArray(data.conflicts)) {
         const stuck = data.conflicts.filter((c) => c.hasScans);
@@ -59,6 +68,11 @@ export default function PickSalesOrders({ onBack }) {
       } else if (!r.ok) {
         alert("Couldn't start wave: " + (data?.error || `API ${r.status}`));
         return;
+      }
+      // H-3 partial case: some — but not all — requested SOs at this
+      // location were already fulfilled. The wave starts with the rest.
+      if (Array.isArray(data?.droppedSoIds) && data.droppedSoIds.length > 0) {
+        alert(`Heads up — ${data.droppedSoIds.length} SO${data.droppedSoIds.length === 1 ? "" : "s"} at ${locationName} were already fulfilled from another location. Continuing with the rest.`);
       }
       setSelectedLocation({ id: locationId, name: locationName });
       setWave(data);

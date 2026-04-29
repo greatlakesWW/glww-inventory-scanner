@@ -1,6 +1,6 @@
 import { runSuiteQL } from "./_suiteql.js";
 import { kv } from "@vercel/kv";
-import { KEY_SO_LOCK } from "./_kv.js";
+import { KEY_SO_LOCK, KEY_SO_LOCK_LEGACY } from "./_kv.js";
 
 // ═══════════════════════════════════════════════════════════
 // GET /api/sales-orders?location={id}
@@ -124,9 +124,21 @@ export default async function handler(req, res) {
     });
 
     if (orders.length > 0) {
-      const lockKeys = orders.map((o) => KEY_SO_LOCK(o.id));
-      const lockSessionIds = await Promise.all(lockKeys.map((k) => kv.get(k)));
-      // Fetch each owning wave session once to get pickerName + updatedAt.
+      // Lock decoration is location-scoped — an SO locked at *another*
+      // location should appear unlocked here, since two pickers at
+      // different warehouses can simultaneously work different lines
+      // of the same SO. We still check the legacy un-scoped key as a
+      // fallback during the H-4 migration window.
+      const scopedKeys = orders.map((o) => KEY_SO_LOCK(o.id, locationId));
+      const legacyKeys = orders.map((o) => KEY_SO_LOCK_LEGACY(o.id));
+      const [scopedSessionIds, legacySessionIds] = await Promise.all([
+        Promise.all(scopedKeys.map((k) => kv.get(k))),
+        // LEGACY_LOCK — drop this branch with the rest of the
+        // migration fallbacks once 48h have elapsed post-deploy.
+        Promise.all(legacyKeys.map((k) => kv.get(k))),
+      ]);
+      const lockSessionIds = scopedSessionIds.map((scoped, i) => scoped || legacySessionIds[i] || null);
+
       const uniqueSessionIds = [...new Set(lockSessionIds.filter(Boolean))];
       const sessions = await Promise.all(
         uniqueSessionIds.map((id) => kv.get(`session:wave:${id}`))
@@ -137,11 +149,14 @@ export default async function handler(req, res) {
       orders.forEach((o, i) => {
         const sid = lockSessionIds[i];
         const s = sid ? bySessionId[sid] : null;
-        if (s) {
-          o.lockedBy = s.pickerName || null;
-          o.lockedAt = s.updatedAt || null;
-          o.lockedSessionId = sid;
-        }
+        if (!s) return;
+        // Belt-and-braces: if a fallback legacy lock points to a
+        // session that turns out to be at a different location, drop
+        // the decoration. (Scoped locks are inherently this-location.)
+        if (s.locationId && String(s.locationId) !== String(locationId)) return;
+        o.lockedBy = s.pickerName || null;
+        o.lockedAt = s.updatedAt || null;
+        o.lockedSessionId = sid;
       });
     }
 

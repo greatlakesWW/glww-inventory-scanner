@@ -1,11 +1,10 @@
-import { kv } from "@vercel/kv";
 import {
   getWaveSession,
   writeWaveSession,
   deleteWaveSession,
   newEventId,
   getSOLock,
-  KEY_SO_LOCK,
+  deleteSOLock,
 } from "../_kv.js";
 
 // ═══════════════════════════════════════════════════════════
@@ -113,8 +112,10 @@ async function handlePatch(req, res, session) {
       if ((session.soIds || []).includes(soId)) {
         return res.status(200).json(session); // already in wave, idempotent
       }
-      // Check the target SO isn't locked by another session.
-      const lockOwner = await getSOLock(soId);
+      // Check the target SO isn't locked by another session AT THIS
+      // location. A lock at a sibling location is fine — the new wave
+      // and the existing one are working different physical lines.
+      const lockOwner = await getSOLock(soId, session.locationId);
       if (lockOwner && lockOwner !== session.sessionId) {
         return res.status(409).json({ error: "so_locked_by_other_session", lockedSessionId: lockOwner });
       }
@@ -163,10 +164,12 @@ async function handlePatch(req, res, session) {
     ...(soIdsUpdate ? { soIds: soIdsUpdate } : {}),
   };
 
-  // If we removed an SO, drop its lock key so another wave can claim it.
+  // If we removed an SO, drop its lock key at THIS wave's location so
+  // another wave can claim that {soId, locationId} pair. Locks held by
+  // other waves at sibling locations are untouched.
   if (type === "remove_so") {
     const removedSoId = body.soId != null ? String(body.soId) : "";
-    if (removedSoId) await kv.del(KEY_SO_LOCK(removedSoId));
+    if (removedSoId) await deleteSOLock(removedSoId, session.locationId);
   }
 
   await writeWaveSession(updated);

@@ -1,4 +1,5 @@
 import { runSuiteQL, batchIds } from "../_suiteql.js";
+import { loadSORemainingAtLocation } from "../_so-fulfillment.js";
 
 // ═══════════════════════════════════════════════════════════
 // GET /api/sales-orders/:id?location={id}
@@ -9,6 +10,13 @@ import { runSuiteQL, batchIds } from "../_suiteql.js";
 // location is required because an SO can have lines at multiple
 // locations; a picker only cares about the ones they can physically
 // grab from where they're standing.
+//
+// For Pending Fulfillment SOs the line set comes straight from
+// SuiteQL (every line is unfulfilled). For Partially Fulfilled SOs
+// — which happen the moment a sibling location ships an IF — the
+// shared helper falls back to a REST Record API fetch to read
+// quantityFulfilled per line and computes the actual remaining qty.
+// See PRD H-1.
 // ═══════════════════════════════════════════════════════════
 
 export default async function handler(req, res) {
@@ -35,55 +43,13 @@ export default async function handler(req, res) {
   }
 
   try {
-    // ─── Header ───
-    const headerRows = await runSuiteQL(`
-      SELECT
-        t.id AS id,
-        t.tranid AS tran_id,
-        t.trandate AS tran_date,
-        BUILTIN.DF(t.entity) AS customer_name,
-        BUILTIN.DF(t.status) AS status_name,
-        t.status AS status_id
-      FROM transaction t
-      WHERE t.id = ${soId}
-        AND t.type = 'SalesOrd'
-    `);
-    if (headerRows.items.length === 0) {
-      return res.status(404).json({ error: "Sales order not found" });
-    }
-    const hdr = headerRows.items[0];
-
-    // SuiteQL's SEARCH channel doesn't expose transactionline.quantityfulfilled
-    // in this account (same constraint as api/transfer-orders/[id].js hit).
-    // We only list Pending Fulfillment SOs, where every line is
-    // unfulfilled, so qty_remaining == qty_ordered here. If support for
-    // Partially Fulfilled SOs is added later, swap this query for a
-    // REST Record API fetch so quantityFulfilled becomes available.
-    //
-    // SO transactionline.quantity is stored NEGATIVE; ABS() for display.
-    const lineRows = await runSuiteQL(`
-      SELECT
-        tl.id AS line_id,
-        tl.linesequencenumber AS line_number,
-        tl.item AS item_id,
-        item.itemid AS sku,
-        item.displayname AS display_name,
-        item.upccode AS upc,
-        ABS(tl.quantity) AS qty_ordered
-      FROM transactionline tl
-      JOIN item ON item.id = tl.item
-      WHERE tl.transaction = ${soId}
-        AND tl.mainline = 'F'
-        AND tl.location = ${locationId}
-        AND tl.itemtype IN ('InvtPart', 'Assembly', 'Kit')
-        AND ABS(tl.quantity) > 0
-      ORDER BY tl.linesequencenumber ASC
-    `);
-
-    const lines = lineRows.items;
+    const so = await loadSORemainingAtLocation(soId, locationId);
+    if (!so) return res.status(404).json({ error: "Sales order not found" });
 
     // ─── Bin availability per item at this location ───
-    const itemIds = [...new Set(lines.map((l) => Number(l.item_id)).filter((n) => Number.isInteger(n)))];
+    const itemIds = [...new Set(
+      so.lines.map((l) => Number(l.itemId)).filter((n) => Number.isInteger(n))
+    )];
     const binsByItem = {};
     if (itemIds.length > 0) {
       for (const batch of batchIds(itemIds, 200)) {
@@ -112,29 +78,25 @@ export default async function handler(req, res) {
       }
     }
 
-    const shapedLines = lines.map((l) => {
-      const itemId = l.item_id != null ? String(l.item_id) : null;
-      const qtyOrdered = Number(l.qty_ordered) || 0;
-      return {
-        lineId: l.line_id != null ? String(l.line_id) : null,
-        lineNumber: l.line_number != null ? Number(l.line_number) : null,
-        itemId,
-        sku: l.sku || null,
-        description: l.display_name || null,
-        upc: l.upc || null,
-        qtyOrdered,
-        qtyAlreadyFulfilled: 0,
-        qtyRemaining: qtyOrdered,
-        binAvailability: itemId ? (binsByItem[itemId] || []) : [],
-      };
-    });
+    const shapedLines = so.lines.map((l) => ({
+      lineId: l.lineId,
+      lineNumber: l.lineNumber,
+      itemId: l.itemId,
+      sku: l.sku,
+      description: l.description,
+      upc: l.upc,
+      qtyOrdered: l.qtyOrdered,
+      qtyAlreadyFulfilled: l.qtyAlreadyFulfilled,
+      qtyRemaining: l.qtyRemaining,
+      binAvailability: l.itemId ? (binsByItem[l.itemId] || []) : [],
+    }));
 
     return res.status(200).json({
-      id: String(hdr.id),
-      tranId: hdr.tran_id || null,
-      orderDate: hdr.tran_date || null,
-      customerName: hdr.customer_name || null,
-      status: hdr.status_name || hdr.status_id || null,
+      id: so.id,
+      tranId: so.tranId,
+      orderDate: so.orderDate,
+      customerName: so.customerName,
+      status: so.statusName || so.statusId,
       sourceLocationId: String(locationId),
       lines: shapedLines,
     });

@@ -5,8 +5,8 @@ A barcode-scanner-driven workflow for pickers to pull stock for **multiple Shopi
 The defining choices:
 
 - **Wave picking** — many SOs are picked simultaneously as one aggregated list (one row per SKU, summed across SOs). Allocation back to individual SOs happens at fulfill time, not pick time.
-- **Multi-location aware** — a single SO can have lines at multiple warehouses. The picker scans the order numbers, the app groups them by source location, and the picker walks one location at a time.
-- **Multi-picker safe** — the backend tracks SO locks in Vercel KV so two pickers can't accidentally wave the same order. There's a controlled override path for stale locks.
+- **Multi-location aware** — a single SO can have lines at multiple warehouses. The picker scans the order numbers, the app groups them by source location, and pickers at *different* locations can work the same SO concurrently — locks are scoped per `{soId, locationId}`.
+- **Multi-picker safe** — the backend tracks SO locks in Vercel KV so two pickers at the *same* location can't wave the same order. Different locations don't conflict. There's a controlled override path for stale locks.
 - **FIFO allocation, oldest SO first** — at fulfill time, scanned units are doled out to SOs in `trandate ASC` order, line by line.
 
 ---
@@ -53,11 +53,12 @@ When the picker taps "Pick →" on a location card, control jumps to the wave-pi
 
 `PickSalesOrders.handlePickAtLocation` POSTs `{ pickerName, locationId, soIds }`. The backend:
 
-1. Reads the lock key `session:so-lock:{soId}` for each SO.
-2. **Conflict detection:** any SO locked by a different picker → returns 409 with a `conflicts[]` payload that includes `hasScans: boolean` per conflict.
-3. **Force-override path** (`force: true`): only releases locks where `hasScans === false`. Locks with real scan events are protected — even the override can't clobber actual work.
-4. **Resume path:** if the same picker already owns a wave with overlapping SOs, the new SOs are merged into that wave instead of creating a new one.
-5. Otherwise creates `session:wave:{sessionId}` JSON and writes a `session:so-lock:{soId} = sessionId` for each SO. 48h TTL, refreshed on every write.
+1. **H-3 validation:** for each SO, confirms there are still unfulfilled lines at the requested location (a sibling-location wave may have already shipped them). If *all* requested SOs are clear, returns 409 `already_fulfilled_at_location`. If only some are, the wave starts with the rest and the response carries `droppedSoIds[]`.
+2. Reads the lock key `session:so-lock:{soId}:{locationId}` for each remaining SO.
+3. **Conflict detection:** an SO locked at *this* location by a different picker → 409 with `conflicts[]` (each entry includes `hasScans: boolean`). A lock at a *sibling* location is not a conflict.
+4. **Force-override path** (`force: true`): only releases locks where `hasScans === false`, and only at this location. Real-work locks and sibling-location locks are untouched.
+5. **Resume path:** if the same picker already owns a wave at the same `{locationId}` with overlapping SOs, the new SOs are merged into that wave instead of creating a new one.
+6. Otherwise creates `session:wave:{sessionId}` JSON and writes a `session:so-lock:{soId}:{locationId} = sessionId` for each SO. 48h TTL, refreshed on every write.
 
 ### 3. Wave picking (`WavePickScreen.jsx`)
 
@@ -104,8 +105,9 @@ The dynamic record API + manual subrecord rewrite is required because the REST `
 | Storage | Key | Purpose | TTL |
 |---|---|---|---|
 | Vercel KV | `session:wave:{sessionId}` | Full wave session JSON (events, soIds, picker, status) | 48h, refreshed each write |
-| Vercel KV | `session:so-lock:{soId}` | Which session currently owns this SO | 48h, refreshed each write |
-| Vercel KV | `shortage:{ts}:{soId}` | Picker-marked-unavailable items for admin follow-up | 30 days |
+| Vercel KV | `session:so-lock:{soId}:{locationId}` | Which session currently owns this SO at this location | 48h, refreshed each write |
+| Vercel KV | `session:so-lock:{soId}` (legacy) | Pre-location-scoping format. Read-only fallback during 48h migration window. Remove after. | 48h |
+| Vercel KV | `shortage:{ts}:{soId}:{locationId}` | Picker-marked-unavailable items for admin follow-up | 30 days |
 | localStorage | `glww_so_plan_v1` | Plan state (scanned, resolved, completedLocations) | indefinite |
 | localStorage | `glww_picker_name` | Last entered picker name | indefinite |
 | localStorage | `glww_device_id` | Random device identifier sent with every PATCH | indefinite |
@@ -123,7 +125,7 @@ The dynamic record API + manual subrecord rewrite is required because the REST `
 
 ### NetSuite / SuiteQL quirks
 
-1. **`transactionline.quantityfulfilled` is NOT exposed to SuiteQL's SEARCH channel** in this account. The list endpoint and detail endpoint both work around this by **only listing Pending Fulfillment (`status = 'B'`) SOs**, where every line is unfulfilled, and treating `qty_remaining = ABS(qty_ordered)`. **Adding support for Partially Fulfilled SOs requires switching to the REST Record API** — see comments at the top of `api/sales-orders/[id].js` and `api/so-sessions/[id]/fulfill.js`.
+1. **`transactionline.quantityfulfilled` is NOT exposed to SuiteQL's SEARCH channel** in this account. The list endpoint still filters on Pending Fulfillment (`status = 'B'`) only — Partially Fulfilled SOs don't appear in the browse view. The `/resolve` and detail endpoints DO support Partially Fulfilled (`status = 'D'`) SOs via a REST Record API fallback in `api/_so-fulfillment.js`; this is required so the second location's plan still works after the first ships. The fulfill endpoint still uses SuiteQL — the RESTlet's `record.transform` handles already-fulfilled lines server-side.
 
 2. **SO `transactionline.quantity` is stored NEGATIVE.** Every place it's read uses `ABS()`. If you write a new query, you'll forget this once and confuse yourself for an hour.
 
@@ -159,4 +161,4 @@ The dynamic record API + manual subrecord rewrite is required because the REST `
 
 15. **`PlanScreen.handleScan` calls `/resolve` one key at a time** even though the endpoint takes `keys[]`. Each scan = 3 SuiteQL round-trips (header + lines-by-loc + location-name). Bulk scanning a stack of orders is slower than it could be — batching the keys client-side would be a worthwhile optimization.
 
-16. **Cross-location SOs stay Partially Fulfilled.** A wave only fulfills lines at the wave's source location. Lines at other locations are simply ignored, leaving the SO partially fulfilled. The PlanScreen UX expects this — same SO appears under multiple location cards, picker walks each in turn — but if a future change introduces a single-location flow without the plan layer, it's easy to forget that "the SO didn't ship fully" is the *intended* outcome here.
+16. **Cross-location SOs stay Partially Fulfilled until every location ships.** A wave only fulfills lines at the wave's source location. Lines at other locations are ignored; the SO becomes Partially Fulfilled (`status='D'`) after the first IF and Fulfilled after the last. With location-scoped locks, two pickers at different warehouses can ship those IFs concurrently. The `/resolve` and detail endpoints handle status='D' so the second location's plan still resolves the SO. The fulfill endpoint retries once on `RCRD_HAS_BEEN_CHANGED` (NetSuite optimistic concurrency on the parent SO record).

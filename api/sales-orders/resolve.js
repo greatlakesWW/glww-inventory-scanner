@@ -1,4 +1,5 @@
 import { runSuiteQL } from "../_suiteql.js";
+import { loadSOPerLocationRemaining } from "../_so-fulfillment.js";
 
 // ═══════════════════════════════════════════════════════════
 // POST /api/sales-orders/resolve
@@ -11,14 +12,23 @@ import { runSuiteQL } from "../_suiteql.js";
 // Body: { keys: ["25333", "SO111", "#25334"] }
 //   Each key is tried against both custbody_fa_channel_order
 //   (Shopify number) and tranid (NetSuite SO#). Status filter is
-//   "Pending Fulfillment" only — same as the regular list path.
+//   Pending Fulfillment ('B') OR Partially Fulfilled ('D') so the
+//   second location's plan still resolves the SO after the first
+//   location ships. (See PRD H-1.)
+//
+// For Pending Fulfillment SOs the per-location aggregate comes from
+// SuiteQL — every line is unfulfilled so summing tl.quantity gives
+// the right answer. For Partially Fulfilled SOs, SuiteQL can't see
+// quantityfulfilled in this account; we fall back to a REST Record
+// API fetch (one per partial SO) to compute *remaining* qty per
+// location and override the SuiteQL roll-up.
 //
 // Response:
 //   {
 //     resolved: [
 //       {
 //         id, tranId, shopifyOrderNumber, orderDate,
-//         customerId, customerName,
+//         customerId, customerName, status,
 //         perLocation: [
 //           { locationId, locationName, lineCount, totalQty }
 //         ]
@@ -59,10 +69,11 @@ export default async function handler(req, res) {
         t.trandate AS tran_date,
         t.custbody_fa_channel_order AS shopify_order_number,
         t.entity AS entity_id,
+        t.status AS status_id,
         BUILTIN.DF(t.entity) AS customer_name
       FROM transaction t
       WHERE t.type = 'SalesOrd'
-        AND t.status = 'B'
+        AND t.status IN ('B', 'D')
         AND (
           t.custbody_fa_channel_order IN (${shopifyList})
           OR UPPER(t.tranid) IN (${tranList})
@@ -120,7 +131,8 @@ export default async function handler(req, res) {
       for (const l of locs) locNameById[String(l.id)] = l.name;
     }
 
-    // Group lines by SO id.
+    // Group lines by SO id (raw SuiteQL aggregate — accurate for
+    // status='B' SOs).
     const perLocBySo = {};
     for (const l of lineRows) {
       const sid = String(l.so_id);
@@ -134,15 +146,94 @@ export default async function handler(req, res) {
       });
     }
 
-    const resolved = hdrRows.map((r) => ({
-      id: String(r.id),
-      tranId: r.tran_id || null,
-      shopifyOrderNumber: r.shopify_order_number != null ? String(r.shopify_order_number) : null,
-      orderDate: r.tran_date || null,
-      customerId: r.entity_id != null ? String(r.entity_id) : null,
-      customerName: r.customer_name || null,
-      perLocation: perLocBySo[String(r.id)] || [],
-    }));
+    // For Partially Fulfilled SOs the SuiteQL aggregate above counts
+    // ordered qty, not remaining. Override per-location entries with
+    // a REST-derived snapshot so the plan UI shows what's actually
+    // left to pick. Done in parallel — typically only 1-2 partial SOs
+    // per resolve call.
+    const partials = hdrRows.filter((r) => String(r.status_id) === "D");
+    if (partials.length > 0) {
+      await Promise.all(partials.map(async (r) => {
+        const sid = String(r.id);
+        try {
+          const remaining = await loadSOPerLocationRemaining(sid);
+          // Replace this SO's perLocation list with the remaining-qty
+          // version. Keep location names from the SuiteQL lookup.
+          perLocBySo[sid] = Object.entries(remaining).map(([lid, agg]) => ({
+            locationId: lid,
+            locationName: locNameById[lid] || null,
+            lineCount: agg.lineCount,
+            totalQty: agg.totalQty,
+          }));
+          // Backfill any missing location names — REST may have
+          // surfaced a location the SuiteQL aggregate query didn't.
+          const missingLocIds = perLocBySo[sid]
+            .filter((p) => p.locationId && !p.locationName)
+            .map((p) => Number(p.locationId))
+            .filter(Number.isInteger);
+          if (missingLocIds.length > 0) {
+            try {
+              const { items: locs } = await runSuiteQL(
+                `SELECT id, name FROM location WHERE id IN (${missingLocIds.join(",")})`,
+              );
+              const extraNames = {};
+              for (const l of locs) extraNames[String(l.id)] = l.name;
+              perLocBySo[sid] = perLocBySo[sid].map((p) =>
+                p.locationName || !p.locationId ? p : { ...p, locationName: extraNames[p.locationId] || null }
+              );
+            } catch { /* non-fatal */ }
+          }
+        } catch (e) {
+          console.warn(`resolve: REST fallback failed for SO ${sid}:`, e?.message);
+          // Leave the SuiteQL aggregate in place — better to show stale
+          // data than nothing. The detail endpoint will recompute when
+          // the picker drills in.
+        }
+      }));
+    }
+
+    const resolved = hdrRows
+      .map((r) => ({
+        id: String(r.id),
+        tranId: r.tran_id || null,
+        shopifyOrderNumber: r.shopify_order_number != null ? String(r.shopify_order_number) : null,
+        orderDate: r.tran_date || null,
+        customerId: r.entity_id != null ? String(r.entity_id) : null,
+        customerName: r.customer_name || null,
+        status: r.status_id != null ? String(r.status_id) : null,
+        perLocation: perLocBySo[String(r.id)] || [],
+      }))
+      // An SO whose every line at every location was just shipped by a
+      // sibling location should not be returned as resolvable. The
+      // tranid is "matched" but there's nothing to pick.
+      .filter((o) => o.perLocation.length > 0);
+
+    // SOs that the SuiteQL filter matched but have nothing pickable
+    // left should fall back into the unresolved list so the picker
+    // sees clear feedback.
+    const droppedIds = new Set(
+      hdrRows.map((r) => String(r.id)).filter((id) => (perLocBySo[id] || []).length === 0)
+    );
+    if (droppedIds.size > 0) {
+      const droppedTrans = new Set(
+        hdrRows
+          .filter((r) => droppedIds.has(String(r.id)))
+          .map((r) => String(r.tran_id || "").toUpperCase())
+      );
+      const droppedShopify = new Set(
+        hdrRows
+          .filter((r) => droppedIds.has(String(r.id)))
+          .map((r) => r.shopify_order_number != null ? String(r.shopify_order_number) : null)
+          .filter(Boolean)
+      );
+      for (const k of keys) {
+        if (matchedShopify.has(k) && droppedShopify.has(k)) {
+          if (!unresolved.includes(k)) unresolved.push(k);
+        } else if (matchedTrans.has(k.toUpperCase()) && droppedTrans.has(k.toUpperCase())) {
+          if (!unresolved.includes(k)) unresolved.push(k);
+        }
+      }
+    }
 
     return res.status(200).json({ resolved, unresolved });
   } catch (err) {
