@@ -833,10 +833,10 @@ function BinChip({ bin, current, preferred }) {
     display: "inline-flex",
     alignItems: "center",
     gap: 4,
-    padding: "2px 8px",
+    padding: "3px 10px",
     borderRadius: 10,
-    fontSize: 10,
-    fontWeight: 600,
+    fontSize: 13,
+    fontWeight: 700,
     letterSpacing: 0.2,
     ...mono,
   };

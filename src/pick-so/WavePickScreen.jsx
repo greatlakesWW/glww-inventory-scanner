@@ -741,7 +741,7 @@ export default function WavePickScreen({ wave, location, onComplete, onBack }) {
                   </div>
                 )}
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginTop: 4 }}>
-                  <div style={{ fontSize: 10, color: "#64748b", ...mono, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  <div style={{ fontSize: 13, color: "#94a3b8", ...mono, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>
                     {row.bins.length
                       ? row.bins.map((b) => `${b.binNumber}(${b.qtyOnHand})`).join("  ")
                       : "no stock at this location"}
