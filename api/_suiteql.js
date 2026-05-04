@@ -21,6 +21,12 @@ import { getConfig, generateOAuthHeader } from "./_auth.js";
  * Execute a SuiteQL query against NetSuite via signed OAuth 1.0a request.
  * Throws Error on missing credentials or non-2xx response.
  *
+ * Retries on NetSuite's account-wide concurrency 429
+ * (`CONCURRENCY_LIMIT_EXCEEDED`) — that ceiling is shared across every
+ * device, browser tab, and background job hitting NS at the same moment,
+ * so under load even a well-behaved single endpoint can lose the race.
+ * Exponential backoff with jitter, capped at 3 retries.
+ *
  * @param {string} query - SuiteQL statement
  * @param {{ limit?: number, offset?: number }} [opts]
  * @returns {Promise<SuiteQLResult>}
@@ -37,29 +43,54 @@ export async function runSuiteQL(query, opts = {}) {
   const baseUrl = `https://${config.accountId}.suitetalk.api.netsuite.com/services/rest/query/v1/suiteql`;
   const queryParams = { limit: String(limit), offset: String(offset) };
   const fullUrl = `${baseUrl}?limit=${limit}&offset=${offset}`;
-  const authHeader = generateOAuthHeader("POST", baseUrl, queryParams, config);
 
-  const resp = await fetch(fullUrl, {
-    method: "POST",
-    headers: {
-      Authorization: authHeader,
-      "Content-Type": "application/json",
-      Prefer: "transient",
-    },
-    body: JSON.stringify({ q: query }),
-  });
+  const MAX_ATTEMPTS = 4; // initial + 3 retries
+  const BACKOFF_BASE_MS = 250;
 
-  const text = await resp.text();
-  let data = null;
-  if (text) {
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = text;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    // Regenerate auth header per attempt — OAuth nonce/timestamp must be
+    // fresh each request, not reused from the rejected previous one.
+    const authHeader = generateOAuthHeader("POST", baseUrl, queryParams, config);
+
+    const resp = await fetch(fullUrl, {
+      method: "POST",
+      headers: {
+        Authorization: authHeader,
+        "Content-Type": "application/json",
+        Prefer: "transient",
+      },
+      body: JSON.stringify({ q: query }),
+    });
+
+    const text = await resp.text();
+    let data = null;
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = text;
+      }
     }
-  }
 
-  if (!resp.ok) {
+    if (resp.ok) {
+      return {
+        items: (data && data.items) || [],
+        totalResults: (data && data.totalResults) || 0,
+        count: (data && data.count) || 0,
+        hasMore: (data && data.hasMore) || false,
+      };
+    }
+
+    const isConcurrency429 =
+      resp.status === 429 &&
+      JSON.stringify(data || "").includes("CONCURRENCY_LIMIT_EXCEEDED");
+
+    if (isConcurrency429 && attempt < MAX_ATTEMPTS - 1) {
+      const delay = BACKOFF_BASE_MS * (2 ** attempt) + Math.floor(Math.random() * 150);
+      await new Promise((r) => setTimeout(r, delay));
+      continue;
+    }
+
     const detail = typeof data === "object" && data !== null ? JSON.stringify(data) : String(data || "");
     const err = new Error(`SuiteQL ${resp.status}: ${detail.slice(0, 500)}`);
     err.status = resp.status;
@@ -67,12 +98,9 @@ export async function runSuiteQL(query, opts = {}) {
     throw err;
   }
 
-  return {
-    items: (data && data.items) || [],
-    totalResults: (data && data.totalResults) || 0,
-    count: (data && data.count) || 0,
-    hasMore: (data && data.hasMore) || false,
-  };
+  // Unreachable — the loop either returns on 2xx or throws on the final
+  // attempt — but keeps the type checker happy.
+  throw new Error("runSuiteQL: exhausted retry attempts without resolution");
 }
 
 /**
