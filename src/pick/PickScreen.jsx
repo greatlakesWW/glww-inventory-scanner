@@ -224,14 +224,18 @@ export default function PickScreen({ to, onBack }) {
     // existing modules' behaviour.
     const line = openLines[0];
 
-    // §6.1 warn-allow: record even if this bin doesn't carry the line.
+    // Block scans whose (item, bin) pair has 0 NS on-hand. NS rejects
+    // these at IF write time with INVALID_FLD_VALUE on `binnumber`, which
+    // strands the TO mid-fulfillment. Used to be a warn-allow path; that
+    // produced stuck TOs whenever physical and book bins disagreed.
     const binKey = currentBin.binNumber.toUpperCase();
     const expectedHere = lookups.binPlan[binKey]?.has(String(line.lineId));
     if (!expectedHere) {
-      showWarn("Not expected in this bin — recording anyway");
-    } else {
-      setTransientWarn(null);
+      beepWarn(); doFlash("warn");
+      showError(`${line.sku} not in this bin per NetSuite — adjust on-hand or scan from the right bin`);
+      return;
     }
+    setTransientWarn(null);
 
     try {
       await recordScan(line.lineId, line.itemId, currentBin.binId, 1);
@@ -829,10 +833,10 @@ function BinChip({ bin, current, preferred }) {
     display: "inline-flex",
     alignItems: "center",
     gap: 4,
-    padding: "2px 8px",
+    padding: "3px 10px",
     borderRadius: 10,
-    fontSize: 10,
-    fontWeight: 600,
+    fontSize: 13,
+    fontWeight: 700,
     letterSpacing: 0.2,
     ...mono,
   };

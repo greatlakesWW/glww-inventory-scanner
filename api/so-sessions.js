@@ -10,6 +10,7 @@ import {
   KEY_WAVE_SESSION,
 } from "./_kv.js";
 import { loadSORemainingAtLocation } from "./_so-fulfillment.js";
+import { mapWithConcurrency } from "./_concurrency.js";
 
 // ═══════════════════════════════════════════════════════════
 // POST /api/so-sessions
@@ -61,19 +62,22 @@ export default async function handler(req, res) {
     // A sibling-location wave may have already cleared this location's
     // lines while the picker was on break. Surface a clear error rather
     // than burning physical labor on stale plan state.
-    const remainingChecks = await Promise.all(
-      soIds.map(async (id) => {
-        try {
-          const r = await loadSORemainingAtLocation(id, locationId);
-          return { soId: id, ok: !!(r && r.lines && r.lines.length > 0), tranId: r?.tranId || null };
-        } catch (e) {
-          // Don't block wave creation on a transient NetSuite error —
-          // let the existing fulfill-time path handle it. Log so we know.
-          console.warn(`H-3 remaining-lines check failed for SO ${id}@loc${locationId}:`, e?.message);
-          return { soId: id, ok: true, tranId: null };
-        }
-      }),
-    );
+    //
+    // Cap parallelism: loadSORemainingAtLocation fires 2 SuiteQL queries
+    // (header + lines), so a naive Promise.all over N SOs lands 2N
+    // concurrent SuiteQL requests at NS and blows past the account-wide
+    // ~5-call ceiling. Concurrency 2 → 4 in-flight max.
+    const remainingChecks = await mapWithConcurrency(soIds, 2, async (id) => {
+      try {
+        const r = await loadSORemainingAtLocation(id, locationId);
+        return { soId: id, ok: !!(r && r.lines && r.lines.length > 0), tranId: r?.tranId || null };
+      } catch (e) {
+        // Don't block wave creation on a transient NetSuite error —
+        // let the existing fulfill-time path handle it. Log so we know.
+        console.warn(`H-3 remaining-lines check failed for SO ${id}@loc${locationId}:`, e?.message);
+        return { soId: id, ok: true, tranId: null };
+      }
+    });
     const alreadyFulfilled = remainingChecks.filter((c) => !c.ok);
     if (alreadyFulfilled.length === soIds.length) {
       return res.status(409).json({

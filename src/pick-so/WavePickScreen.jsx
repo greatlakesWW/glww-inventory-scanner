@@ -27,6 +27,25 @@ function primaryBin(line) {
   return b ? String(b).toUpperCase() : "\uffff";
 }
 
+// Cap parallel work to avoid blowing past NetSuite's account-wide
+// SuiteQL concurrency limit (~5, shared across every device + tab +
+// background job). Each per-SO detail fetch fires 2-3 SuiteQL calls
+// internally, so a naive Promise.all over a wave with N SOs lands N
+// SuiteQL requests at NS simultaneously and 429s.
+async function mapWithConcurrency(items, concurrency, fn) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (true) {
+      const i = cursor++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 export default function WavePickScreen({ wave, location, onComplete, onBack }) {
   const {
     session, recordScan, removeSO, markUnavailable, undoUnavailable, complete,
@@ -60,16 +79,14 @@ export default function WavePickScreen({ wave, location, onComplete, onBack }) {
         return;
       }
       try {
-        const fetched = await Promise.all(
-          missing.map(async (sid) => {
-            const r = await fetch(
-              `/api/sales-orders/${encodeURIComponent(sid)}?location=${encodeURIComponent(location.id)}`
-            );
-            const d = await r.json();
-            if (!r.ok) throw new Error(d?.error || `SO ${sid} fetch failed`);
-            return [sid, d];
-          })
-        );
+        const fetched = await mapWithConcurrency(missing, 2, async (sid) => {
+          const r = await fetch(
+            `/api/sales-orders/${encodeURIComponent(sid)}?location=${encodeURIComponent(location.id)}`
+          );
+          const d = await r.json();
+          if (!r.ok) throw new Error(d?.error || `SO ${sid} fetch failed`);
+          return [sid, d];
+        });
         if (cancelled) return;
         setDetailBySO((prev) => {
           const next = { ...prev };
@@ -724,7 +741,7 @@ export default function WavePickScreen({ wave, location, onComplete, onBack }) {
                   </div>
                 )}
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginTop: 4 }}>
-                  <div style={{ fontSize: 10, color: "#64748b", ...mono, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  <div style={{ fontSize: 13, color: "#94a3b8", ...mono, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>
                     {row.bins.length
                       ? row.bins.map((b) => `${b.binNumber}(${b.qtyOnHand})`).join("  ")
                       : "no stock at this location"}
