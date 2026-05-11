@@ -1,5 +1,6 @@
 import { runSuiteQL } from "../_suiteql.js";
 import { loadSOPerLocationRemaining } from "../_so-fulfillment.js";
+import { mapWithConcurrency } from "../_concurrency.js";
 
 // ═══════════════════════════════════════════════════════════
 // POST /api/sales-orders/resolve
@@ -149,11 +150,13 @@ export default async function handler(req, res) {
     // For Partially Fulfilled SOs the SuiteQL aggregate above counts
     // ordered qty, not remaining. Override per-location entries with
     // a REST-derived snapshot so the plan UI shows what's actually
-    // left to pick. Done in parallel — typically only 1-2 partial SOs
-    // per resolve call.
+    // left to pick. Typically only 1-2 partial SOs per resolve call,
+    // but cap parallelism so a scan of many partial-status keys at once
+    // doesn't pile onto NS's account-wide SuiteQL concurrency ceiling
+    // (each iteration can also fire a missing-location-name SuiteQL).
     const partials = hdrRows.filter((r) => String(r.status_id) === "D");
     if (partials.length > 0) {
-      await Promise.all(partials.map(async (r) => {
+      await mapWithConcurrency(partials, 2, async (r) => {
         const sid = String(r.id);
         try {
           const remaining = await loadSOPerLocationRemaining(sid);
@@ -189,7 +192,7 @@ export default async function handler(req, res) {
           // data than nothing. The detail endpoint will recompute when
           // the picker drills in.
         }
-      }));
+      });
     }
 
     const resolved = hdrRows
