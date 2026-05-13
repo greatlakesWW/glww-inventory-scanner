@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import {
-  suiteql, nsRecord,
+  suiteql, suiteqlAll, nsRecord,
   beepOk, beepWarn, beepBin,
   S, FONT, ANIMATIONS, mono, fadeIn, Logo,
   loadSession, saveSession, clearSession,
@@ -119,8 +119,11 @@ export default function BinTransfer({ onBack }) {
     setError(null);
     setLoading(true);
     try {
-      // Load bin contents (also validates the bin exists at this location)
-      const contents = await suiteql(`
+      // Load bin contents (also validates the bin exists at this location).
+      // Use suiteqlAll: catch-all Sales Floor bins can hold thousands of
+      // SKUs; the default 1000-row page silently drops items past the cutoff,
+      // and the UPC lookup then fails for any item beyond row 1000.
+      const contents = await suiteqlAll(`
         SELECT
           ib.item AS item_id,
           item.itemid AS sku,
