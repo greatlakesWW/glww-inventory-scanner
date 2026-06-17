@@ -186,7 +186,7 @@ export default function ItemReceipts({ onBack }) {
     setLoading(true); setError(null); setLoadMsg("Loading PO lines...");
     try {
       const rows = await suiteql(`
-        SELECT tl.id AS line_id, tl.item AS item_id,
+        SELECT tl.id AS line_id, tl.linesequencenumber AS line_number, tl.item AS item_id,
           BUILTIN.DF(tl.item) AS item_name, tl.quantity AS ordered_qty,
           item.itemid AS sku, item.upccode AS upc
         FROM transactionline tl JOIN item ON tl.item = item.id
