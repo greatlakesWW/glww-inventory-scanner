@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import {
-  suiteql, suiteqlBatched, nsRecord, beepOk, beepWarn, beepBin,
+  suiteql, beepOk, beepWarn,
   S, FONT, ANIMATIONS, mono, fadeIn, Logo,
   loadSession, saveSession, clearSession, ScanInput, BinScanner,
   useScanRefocus, PulsingDot, ResumePrompt,
@@ -42,13 +42,6 @@ const ProgressBar = ({ current, total, color = ACCENT }) => (
   </div>
 );
 
-const Spinner = ({ msg, color = ACCENT }) => (
-  <div style={{ padding: 16, textAlign: "center", marginTop: 60 }}>
-    <div style={{ width: 64, height: 64, borderRadius: "50%", border: `3px solid ${color}40`, borderTopColor: color, margin: "0 auto 20px", animation: "spin 1s linear infinite" }} />
-    <PulsingDot color={color} label={msg} />
-  </div>
-);
-
 const OverBadge = () => (
   <span style={{ display: "inline-block", padding: "2px 8px", borderRadius: 4, fontSize: 10, fontWeight: 700,
     letterSpacing: 0.4, textTransform: "uppercase", color: "#a78bfa", background: "rgba(167,139,250,0.1)",
@@ -64,7 +57,6 @@ export default function ItemReceipts({ onBack }) {
 
   const [showResume, setShowResume] = useState(hasSavedSession);
   const [phase, setPhase] = useState(hasSavedSession ? "findPO" : (saved?.phase || "findPO"));
-  const [stage, setStage] = useState(saved?.stage || 0); // 0,1,2 for Phase 4 stages
   const [loading, setLoading] = useState(false);
   const [loadMsg, setLoadMsg] = useState("");
   const [error, setError] = useState(null);
@@ -86,28 +78,13 @@ export default function ItemReceipts({ onBack }) {
   const scanRef = useRef(null);
   const { openDrawer, DrawerComponent } = useItemDetailDrawer(scanRef);
 
-  // Phase 3
-  const [allocationPlan, setAllocationPlan] = useState(saved?.allocationPlan || null);
-  const [suggestedBins, setSuggestedBins] = useState(saved?.suggestedBins || {}); // itemId -> bin_number
-
-  // Phase 4
-  const [pickProgress, setPickProgress] = useState(saved?.pickProgress || {}); // "stage::itemId" -> count
-  const [completedStages, setCompletedStages] = useState(saved?.completedStages || []);
-  const [createdTOs, setCreatedTOs] = useState(saved?.createdTOs || {}); // stage -> TO number
-  const [putawayBins, setPutawayBins] = useState(saved?.putawayBins || {}); // itemId -> destination bin
-  const [putawayDone, setPutawayDone] = useState(saved?.putawayDone || {}); // itemId -> true
-  const [putawayCurrentBin, setPutawayCurrentBin] = useState(saved?.putawayCurrentBin || null);
-  const [binTransferCount, setBinTransferCount] = useState(saved?.binTransferCount || 0);
-  const [stageSubmitting, setStageSubmitting] = useState(false);
-
   // Click-anywhere re-focus
-  useScanRefocus(scanRef, phase === "receive" || phase === "pickPutaway");
+  useScanRefocus(scanRef, phase === "receive");
 
   // Session resume
   const handleResume = () => {
     setShowResume(false);
     setPhase(saved?.phase || "findPO");
-    if (saved?.stage !== undefined) setStage(saved.stage);
   };
   const handleFresh = () => {
     setShowResume(false);
@@ -136,15 +113,11 @@ export default function ItemReceipts({ onBack }) {
   useEffect(() => {
     if (phase === "summary") return;
     saveSession(SESSION_KEY, {
-      phase, stage, openPOs, selectedPO, poLines, currentBin, binHistory,
+      phase, openPOs, selectedPO, poLines, currentBin, binHistory,
       receivedItems, binItems, receiptNumber, receiptSubmitted,
-      allocationPlan, suggestedBins, pickProgress, completedStages, createdTOs,
-      putawayBins, putawayDone, putawayCurrentBin, binTransferCount,
     });
-  }, [phase, stage, openPOs, selectedPO, poLines, currentBin, binHistory,
-    receivedItems, binItems, receiptNumber, receiptSubmitted,
-    allocationPlan, suggestedBins, pickProgress, completedStages, createdTOs,
-    putawayBins, putawayDone, putawayCurrentBin, binTransferCount]);
+  }, [phase, openPOs, selectedPO, poLines, currentBin, binHistory,
+    receivedItems, binItems, receiptNumber, receiptSubmitted]);
 
   // ═══════════════════════════════════════════════════════════
   // PHASE 1 — FIND PO
@@ -288,9 +261,8 @@ export default function ItemReceipts({ onBack }) {
       const logLines = poLines.filter(l => (receivedItems[l.item_id] || 0) > 0);
       const binsUsed = [...new Set(Object.keys(binItems).map(k => k.split("::")[0]))];
       try { logActivity({ module: "item-receipts", action: "item-receipt-created", status: "success", sourceDocument: `PO #${selectedPO?.po_number}`, netsuiteRecord: `IR #${rNum}`, details: `${totalReceived} items received into ${binsUsed.join(", ") || "bins"}`, items: logLines.map(l => ({ sku: l.sku, name: l.item_name, qty: receivedItems[l.item_id] })) }); } catch (_) { }
-      // Clear receipt-specific data but keep items/bins for allocation
-      setPhase("allocate");
-      runAllocation();
+      clearSession(SESSION_KEY);
+      setPhase("summary");
     } catch (e) {
       setError(`Receipt failed: ${e.message}`);
       try { logActivity({ module: "item-receipts", action: "item-receipt-failed", status: "error", sourceDocument: `PO #${selectedPO?.po_number}`, details: `Failed to create receipt for ${totalReceived} items`, error: e.message }); } catch (_) { }
@@ -298,232 +270,13 @@ export default function ItemReceipts({ onBack }) {
     finally { setReceiptSubmitting(false); }
   };
 
-  // ═══════════════════════════════════════════════════════════
-  // PHASE 3 — SMART ALLOCATION
-  // ═══════════════════════════════════════════════════════════
-  const runAllocation = async () => {
-    setLoading(true); setLoadMsg("Querying stock levels...");
-    try {
-      const itemIds = Object.keys(receivedItems);
-      const { SALES_FLOOR, BACKROOM, WAREHOUSE } = LOCATIONS;
-      const locIds = `${SALES_FLOOR.id},${BACKROOM.id},${WAREHOUSE.id}`;
-
-      // Try AggregateItemLocation first
-      let stockRows = [];
-      try {
-        stockRows = await suiteqlBatched(`
-          SELECT ail.item AS item_id, ail.location AS location_id,
-            BUILTIN.DF(ail.location) AS location_name,
-            ail.preferredstocklevel AS preferred_level,
-            ail.quantityonhand AS qty_on_hand
-          FROM AggregateItemLocation ail
-          WHERE ail.item IN ({IDS}) AND ail.location IN (${locIds})
-        `, itemIds);
-      } catch {
-        // Fallback to inventory item locations
-        stockRows = await suiteqlBatched(`
-          SELECT il.item AS item_id, il.location AS location_id,
-            BUILTIN.DF(il.location) AS location_name,
-            il.preferredstocklevel AS preferred_level,
-            il.quantityonhand AS qty_on_hand
-          FROM InventoryItemLocations il
-          WHERE il.item IN ({IDS}) AND il.location IN (${locIds})
-        `, itemIds);
-      }
-
-      // Build stock map: itemId -> { locId -> { preferred, qoh } }
-      const stockMap = {};
-      stockRows.forEach(r => {
-        if (!stockMap[r.item_id]) stockMap[r.item_id] = {};
-        stockMap[r.item_id][r.location_id] = {
-          preferred: Number(r.preferred_level) || 0,
-          qoh: Number(r.qty_on_hand) || 0,
-        };
-      });
-
-      // Allocation algorithm
-      setLoadMsg("Running allocation...");
-      const plan = { salesFloor: [], backroom: [], warehouse: [] };
-      const itemNames = {};
-      poLines.forEach(l => { itemNames[l.item_id] = { sku: l.sku, item_name: l.item_name }; });
-
-      Object.entries(receivedItems).forEach(([itemId, totalQty]) => {
-        let remaining = totalQty;
-        const info = itemNames[itemId] || { sku: "?", item_name: "?" };
-        const stock = stockMap[itemId] || {};
-
-        // 1. Sales Floor first
-        const sfData = stock[SALES_FLOOR.id] || { preferred: 0, qoh: 0 };
-        const sfGap = Math.max(0, sfData.preferred - sfData.qoh);
-        const sfAlloc = Math.min(sfGap, remaining);
-        if (sfAlloc > 0) {
-          plan.salesFloor.push({ item_id: itemId, ...info, qty: sfAlloc });
-          remaining -= sfAlloc;
-        }
-
-        // 2. Backroom second
-        const brData = stock[BACKROOM.id] || { preferred: 0, qoh: 0 };
-        const brGap = Math.max(0, brData.preferred - brData.qoh);
-        const brAlloc = Math.min(brGap, remaining);
-        if (brAlloc > 0) {
-          plan.backroom.push({ item_id: itemId, ...info, qty: brAlloc });
-          remaining -= brAlloc;
-        }
-
-        // 3. Warehouse gets the rest
-        if (remaining > 0) {
-          plan.warehouse.push({ item_id: itemId, ...info, qty: remaining });
-        }
-      });
-
-      // Query suggested bins for warehouse items
-      if (plan.warehouse.length > 0) {
-        setLoadMsg("Loading suggested bins...");
-        const whItemIds = plan.warehouse.map(i => i.item_id);
-        try {
-          const binRows = await suiteqlBatched(`
-            SELECT ib.item AS item_id, BUILTIN.DF(ib.binnumber) AS bin_number, ib.binnumber AS bin_id
-            FROM inventorybalance ib
-            WHERE ib.item IN ({IDS}) AND ib.location = ${WAREHOUSE.id}
-              AND BUILTIN.DF(ib.binnumber) NOT LIKE 'IN-%' AND ib.quantityonhand > 0
-            ORDER BY BUILTIN.DF(ib.binnumber) ASC
-          `, whItemIds);
-          const bins = {};
-          binRows.forEach(r => { if (!bins[r.item_id]) bins[r.item_id] = r.bin_number; });
-          setSuggestedBins(bins);
-        } catch { /* no bins found */ }
-      }
-
-      setAllocationPlan(plan);
-      setPhase("allocate");
-    } catch (e) { setError(`Allocation failed: ${e.message}`); }
-    finally { setLoading(false); setLoadMsg(""); }
-  };
-
-  // ═══════════════════════════════════════════════════════════
-  // PHASE 4 — PICK & PUTAWAY
-  // ═══════════════════════════════════════════════════════════
-  const stageItems = useMemo(() => {
-    if (!allocationPlan) return [];
-    if (stage === 0) return allocationPlan.salesFloor || [];
-    if (stage === 1) return allocationPlan.backroom || [];
-    return allocationPlan.warehouse || [];
-  }, [allocationPlan, stage]);
-
-  const stageLabel = stage === 0 ? "Sales Floor" : stage === 1 ? "Backroom" : "Warehouse";
-  const stageCompleted = completedStages.includes(stage);
-
-  const handlePickScan = useCallback((val) => {
-    const item = findItem(val);
-    if (!item) { beepWarn(); setFlash("warn"); setTimeout(() => setFlash(null), 400); return; }
-    const si = stageItems.find(i => i.item_id === item.item_id);
-    if (!si) { beepWarn(); setFlash("warn"); setTimeout(() => setFlash(null), 400); return; }
-    const key = `${stage}::${item.item_id}`;
-    const current = pickProgress[key] || 0;
-    if (current >= si.qty) { beepWarn(); setFlash("warn"); setTimeout(() => setFlash(null), 400); return; }
-    setPickProgress(p => ({ ...p, [key]: current + 1 }));
-    beepOk(); setFlash("ok"); setTimeout(() => setFlash(null), 400);
-  }, [stage, stageItems, pickProgress, upcLookup, skuLookup, poLines]);
-
-  const pickedForStage = stageItems.reduce((s, i) => s + (pickProgress[`${stage}::${i.item_id}`] || 0), 0);
-  const totalForStage = stageItems.reduce((s, i) => s + i.qty, 0);
-
-  const createTransferOrder = async () => {
-    if (stageSubmitting) return;
-    setStageSubmitting(true); setError(null);
-    const destLoc = stage === 0 ? LOCATIONS.SALES_FLOOR : LOCATIONS.BACKROOM;
-    try {
-      const result = await nsRecord("POST", "transferOrder", {
-        location: { id: String(LOCATIONS.WAREHOUSE.id) },
-        transferLocation: { id: String(destLoc.id) },
-        memo: `Auto-created from PO#${selectedPO?.po_number} receipt`,
-        item: {
-          items: stageItems.map(i => ({
-            item: { id: String(i.item_id) },
-            quantity: i.qty,
-          })),
-        },
-      });
-      const toNum = result?.data?.tranId || result?.location?.split("/").pop() || "Created";
-      setCreatedTOs(p => ({ ...p, [stage]: toNum }));
-      setCompletedStages(p => [...p, stage]);
-      // Activity log
-      try { logActivity({ module: "item-receipts", action: "transfer-order-auto-created", status: "success", sourceDocument: `PO #${selectedPO?.po_number}`, netsuiteRecord: `TO #${toNum}`, details: `Warehouse → ${destLoc.name}, ${stageItems.length} items`, items: stageItems.map(i => ({ sku: i.sku, name: i.item_name, qty: i.qty })) }); } catch (_) { }
-      // Auto advance
-      if (stage < 2) setStage(p => p + 1);
-      else setPhase("summary");
-    } catch (e) {
-      setError(`TO creation failed: ${e.message}`);
-      try { logActivity({ module: "item-receipts", action: "transfer-order-failed", status: "error", sourceDocument: `PO #${selectedPO?.po_number}`, details: `Failed TO Warehouse → ${destLoc.name}`, items: stageItems.map(i => ({ sku: i.sku, name: i.item_name, qty: i.qty })), error: e.message }); } catch (_) { }
-    }
-    finally { setStageSubmitting(false); }
-  };
-
-  const skipStage = () => {
-    setCompletedStages(p => [...p, stage]);
-    if (stage < 2) setStage(p => p + 1);
-    else setPhase("summary");
-  };
-
-  // Putaway handlers (stage 2)
-  const handlePutawayBinScan = useCallback((val) => {
-    setPutawayCurrentBin(val.trim());
-    beepBin();
-  }, []);
-
-  const handlePutawayItemScan = useCallback((val) => {
-    const item = findItem(val);
-    if (!item) { beepWarn(); setFlash("warn"); setTimeout(() => setFlash(null), 400); return; }
-    const whItem = stageItems.find(i => i.item_id === item.item_id);
-    if (!whItem || putawayDone[item.item_id]) { beepWarn(); setFlash("warn"); setTimeout(() => setFlash(null), 400); return; }
-    setPutawayBins(p => ({ ...p, [item.item_id]: putawayCurrentBin }));
-    setPutawayDone(p => ({ ...p, [item.item_id]: true }));
-    beepOk(); setFlash("ok"); setTimeout(() => setFlash(null), 400);
-
-    // Create bin transfer for ALL source bins
-    const itemBins = getItemBinAssignments();
-    const fromBins = itemBins[item.item_id] || [];
-    if (fromBins.length > 0 && putawayCurrentBin) {
-      for (const fromEntry of fromBins) {
-        nsRecord("POST", "inventoryTransfer", {
-          location: { id: String(LOCATIONS.WAREHOUSE.id) },
-          inventory: {
-            items: [{
-              item: { id: String(item.item_id) },
-              adjustQtyBy: fromEntry.qty,
-              fromBin: fromEntry.bin,
-              toBin: putawayCurrentBin,
-            }],
-          },
-        }).then(() => {
-          setBinTransferCount(p => p + 1);
-          try { logActivity({ module: "item-receipts", action: "bin-transfer-completed", status: "success", sourceDocument: `PO #${selectedPO?.po_number}`, details: `${item.sku} ×${fromEntry.qty}: ${fromEntry.bin} → ${putawayCurrentBin}`, items: [{ sku: item.sku, name: item.item_name, qty: fromEntry.qty }] }); } catch (_) { }
-        }).catch((err) => {
-          try { logActivity({ module: "item-receipts", action: "bin-transfer-failed", status: "error", sourceDocument: `PO #${selectedPO?.po_number}`, details: `${item.sku}: ${fromEntry.bin} → ${putawayCurrentBin}`, items: [{ sku: item.sku, name: item.item_name, qty: fromEntry.qty }], error: err?.message || "Unknown error" }); } catch (_) { }
-        });
-      }
-    }
-  }, [putawayCurrentBin, stageItems, putawayDone, upcLookup, skuLookup, poLines]);
-
-  const putawayCompleteCount = Object.keys(putawayDone).length;
-  const putawayTotalCount = stageItems.length;
-
-  const finishPutaway = () => {
-    setCompletedStages(p => [...p, 2]);
-    clearSession(SESSION_KEY); // Clear session on all putaway complete
-    setPhase("summary");
-  };
-
   // Reset
   const resetModule = () => {
     clearSession(SESSION_KEY);
-    setPhase("findPO"); setStage(0); setOpenPOs([]); setSelectedPO(null);
+    setPhase("findPO"); setOpenPOs([]); setSelectedPO(null);
     setPOLines([]); setCurrentBin(null); setBinHistory([]); setReceivedItems({});
     setBinItems({}); setReceiptNumber(null); setReceiptSubmitting(false);
-    setReceiptSubmitted(false); setAllocationPlan(null); setSuggestedBins({});
-    setPickProgress({}); setCompletedStages([]); setCreatedTOs({});
-    setPutawayBins({}); setPutawayDone({}); setPutawayCurrentBin(null);
-    setBinTransferCount(0); setError(null);
+    setReceiptSubmitted(false); setError(null);
   };
 
   // ═══════════════════════════════════════════════════════════
@@ -668,251 +421,14 @@ export default function ItemReceipts({ onBack }) {
     );
   }
   // ═══════════════════════════════════════════════════════════
-  if (phase === "allocate") {
-    if (loading || !allocationPlan) {
-      return (
-        <div style={S.root}>
-          <style>{FONT}{ANIMATIONS}</style>
-          <Header title="Smart Allocation" />
-          <Spinner msg={loadMsg || "Running allocation..."} />
-          {error && <div style={{ ...S.err, margin: 16 }}>{error}</div>}
-        </div>
-      );
-    }
-
-    const sfTotal = allocationPlan.salesFloor.reduce((s, i) => s + i.qty, 0);
-    const brTotal = allocationPlan.backroom.reduce((s, i) => s + i.qty, 0);
-    const whTotal = allocationPlan.warehouse.reduce((s, i) => s + i.qty, 0);
-
-    const AllocSection = ({ title, items, color, icon }) => items.length === 0 ? null : (
-      <div style={{ ...S.card, borderColor: `${color}40`, marginBottom: 10 }}>
-        <div style={{ fontSize: 14, fontWeight: 700, color, marginBottom: 8 }}>{icon} {title} — {items.reduce((s, i) => s + i.qty, 0)} items</div>
-        {items.map((item, i) => (
-          <div key={item.item_id} onClick={() => openDrawer(item.item_id)} style={{ padding: "6px 0", borderTop: i > 0 ? "1px solid rgba(255,255,255,0.04)" : "none",
-            display: "flex", justifyContent: "space-between", fontSize: 12, cursor: "pointer", touchAction: "manipulation" }}>
-            <div>
-              <span style={{ ...mono, color: "#e2e8f0", fontWeight: 600 }}>{item.sku}</span>
-              <span style={{ color: "#94a3b8", marginLeft: 8 }}>{item.item_name}</span>
-            </div>
-            <span style={{ ...mono, fontWeight: 700, color }}>×{item.qty}</span>
-          </div>
-        ))}
-      </div>
-    );
-
-    return (
-      <div style={S.root}>
-        <style>{FONT}{ANIMATIONS}</style>
-        <Header title="Allocation Plan" />
-        <div style={{ padding: 16 }}>
-          {receiptNumber && (
-            <div style={{ ...S.card, background: "rgba(34,197,94,0.04)", border: "1px solid rgba(34,197,94,0.2)", marginBottom: 12 }}>
-              <div style={{ fontSize: 12, color: "#22c55e", fontWeight: 700 }}>✓ Receipt #{receiptNumber} created</div>
-            </div>
-          )}
-
-          {/* Stats */}
-          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-            {[
-              { n: sfTotal, l: "Sales Floor", c: "#22c55e" },
-              { n: brTotal, l: "Backroom", c: "#3b82f6" },
-              { n: whTotal, l: "Warehouse", c: ACCENT },
-            ].map(s => (
-              <div key={s.l} style={{ flex: 1, textAlign: "center", padding: "12px 8px", borderRadius: 8,
-                background: `${s.c}10`, border: `1px solid ${s.c}30` }}>
-                <div style={{ fontSize: 24, fontWeight: 700, ...mono, color: s.c }}>{s.n}</div>
-                <div style={{ fontSize: 9, color: s.c, textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 600 }}>{s.l}</div>
-              </div>
-            ))}
-          </div>
-
-          <AllocSection title="Pick for Sales Floor" items={allocationPlan.salesFloor} color="#22c55e" icon="⇢" />
-          <AllocSection title="Pick for Backroom" items={allocationPlan.backroom} color="#3b82f6" icon="⇢" />
-          <AllocSection title="Putaway at Warehouse" items={allocationPlan.warehouse.map(i => ({
-            ...i, suggestedBin: suggestedBins[i.item_id] || null,
-          }))} color={ACCENT} icon="↓" />
-
-          {/* Suggested bins for warehouse items */}
-          {allocationPlan.warehouse.length > 0 && (
-            <div style={{ fontSize: 11, color: "#64748b", marginBottom: 12 }}>
-              {allocationPlan.warehouse.map((item, i) => (
-                <div key={item.item_id} style={{ padding: "4px 0" }}>
-                  <span style={{ ...mono, color: "#94a3b8" }}>{item.sku}</span>
-                  <span style={{ marginLeft: 8 }}>→ {suggestedBins[item.item_id] || "No assigned bin — scan to assign"}</span>
-                </div>
-              ))}
-            </div>
-          )}
-
-          <button style={{ ...S.btn, background: "#22c55e" }} onClick={() => {
-            // Skip to first non-empty stage
-            const firstNonEmpty = [0, 1, 2].find(s => {
-              const items = s === 0 ? allocationPlan.salesFloor : s === 1 ? allocationPlan.backroom : allocationPlan.warehouse;
-              return items.length > 0;
-            });
-            setStage(firstNonEmpty ?? 0);
-            setPhase("pickPutaway");
-          }}>
-            Start Putaway →
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // RENDER: PHASE 4 — PICK & PUTAWAY
-  // ═══════════════════════════════════════════════════════════
-  if (phase === "pickPutaway") {
-    // Skip completed stages
-    const effectiveStage = [0, 1, 2].find(s => !completedStages.includes(s));
-    if (effectiveStage !== undefined && effectiveStage !== stage) {
-      setTimeout(() => setStage(effectiveStage), 0);
-      return null;
-    }
-    if (effectiveStage === undefined) {
-      setTimeout(() => setPhase("summary"), 0);
-      return null;
-    }
-
-    // Stage 0 & 1: Pick for Sales Floor / Backroom
-    if (stage < 2) {
-      if (stageItems.length === 0) {
-        // Nothing to pick, skip
-        setTimeout(() => skipStage(), 0);
-        return null;
-      }
-
-      return (
-        <div style={S.root}>
-          <style>{FONT}{ANIMATIONS}</style>
-          <Header title={`Picking for ${stageLabel}`} backLabel="Allocation" backAction={() => setPhase("allocate")} />
-          <div style={{ padding: 16 }}>
-            {error && <div style={S.err}>{error}</div>}
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#94a3b8", marginBottom: 4 }}>
-              <span>Stage {stage + 1} of 3</span>
-              <span>{pickedForStage} / {totalForStage} picked</span>
-            </div>
-            <ProgressBar current={pickedForStage} total={totalForStage} color={stage === 0 ? "#22c55e" : "#3b82f6"} />
-
-            <ScanInput inputRef={scanRef} onScan={handlePickScan} placeholder="Scan item UPC..." flash={flash} />
-
-            <div style={{ marginTop: 12 }}>
-              {stageItems.map((item, i) => {
-                const picked = pickProgress[`${stage}::${item.item_id}`] || 0;
-                const done = picked >= item.qty;
-                return (
-                  <div key={item.item_id} onClick={(e) => { e.stopPropagation(); openDrawer(item.item_id); }} style={{ padding: "8px 0", borderTop: i > 0 ? "1px solid rgba(255,255,255,0.04)" : "none", opacity: done ? 0.5 : 1, cursor: "pointer", touchAction: "manipulation" }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <div>
-                        <div style={{ fontSize: 13, fontWeight: 600, ...mono, color: "#e2e8f0" }}>{item.sku}</div>
-                        <div style={{ fontSize: 11, color: "#94a3b8" }}>{item.item_name}</div>
-                      </div>
-                      <div style={{ fontSize: 14, fontWeight: 700, ...mono, color: done ? "#22c55e" : "#e2e8f0" }}>
-                        {picked}/{item.qty} {done && "✓"}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-              <button style={{ ...S.btn, flex: 1, background: stage === 0 ? "#22c55e" : "#3b82f6",
-                opacity: stageSubmitting ? 0.5 : 1 }}
-                onClick={createTransferOrder} disabled={stageSubmitting || pickedForStage === 0}>
-                {stageSubmitting ? "Creating TO..." : `Done Picking → Create TO`}
-              </button>
-            </div>
-            <button style={{ ...S.btnSec, marginTop: 8 }} onClick={skipStage}>Skip for now</button>
-          </div>
-        </div>
-      );
-    }
-
-    // Stage 2: Putaway at Warehouse
-    if (stageItems.length === 0) {
-      setTimeout(() => skipStage(), 0);
-      return null;
-    }
-
-    return (
-      <div style={S.root}>
-        <style>{FONT}{ANIMATIONS}</style>
-        <Header title="Putaway at Warehouse" backLabel="Allocation" backAction={() => setPhase("allocate")} />
-        <div style={{ padding: 16 }}>
-          {error && <div style={S.err}>{error}</div>}
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#94a3b8", marginBottom: 4 }}>
-            <span>Stage 3 of 3 — Putaway</span>
-            <span>{putawayCompleteCount} / {putawayTotalCount} shelved</span>
-          </div>
-          <ProgressBar current={putawayCompleteCount} total={putawayTotalCount} color={ACCENT} />
-
-          {/* Destination bin scanner */}
-          <div style={{ ...S.card, background: "rgba(99,102,241,0.04)", border: "2px solid rgba(99,102,241,0.3)", textAlign: "center", padding: 16, marginBottom: 10 }}>
-            <div style={{ fontSize: 11, color: "#818cf8", textTransform: "uppercase", letterSpacing: 1, fontWeight: 700, marginBottom: 8 }}>
-              {putawayCurrentBin ? "Destination Bin" : "Scan Destination Bin"}
-            </div>
-            {putawayCurrentBin ? (
-              <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 12 }}>
-                <span style={{ fontSize: 24, fontWeight: 700, ...mono, color: "#a5b4fc" }}>{putawayCurrentBin}</span>
-                <button style={{ ...S.btnSm, fontSize: 11 }} onClick={() => setPutawayCurrentBin(null)}>Switch</button>
-              </div>
-            ) : (
-              <ScanInput onScan={handlePutawayBinScan} placeholder="Scan bin..." />
-            )}
-          </div>
-
-          {putawayCurrentBin && (
-            <ScanInput inputRef={scanRef} onScan={handlePutawayItemScan} placeholder="Scan item to shelve..." flash={flash} />
-          )}
-
-          <div style={{ marginTop: 12 }}>
-            {stageItems.map((item, i) => {
-              const done = putawayDone[item.item_id];
-              const bin = putawayBins[item.item_id] || suggestedBins[item.item_id];
-              return (
-                <div key={i} onClick={(e) => { e.stopPropagation(); openDrawer(item.item_id); }} style={{ padding: "10px 0", borderTop: i > 0 ? "1px solid rgba(255,255,255,0.04)" : "none", opacity: done ? 0.5 : 1, cursor: "pointer", touchAction: "manipulation" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <div>
-                      <div style={{ fontSize: 13, fontWeight: 600, ...mono, color: "#e2e8f0" }}>{item.sku}</div>
-                      <div style={{ fontSize: 11, color: "#94a3b8" }}>{item.item_name}</div>
-                      <div style={{ fontSize: 10, color: "#818cf8", ...mono, marginTop: 2 }}>
-                        {done ? `✓ → ${putawayBins[item.item_id]}` : bin ? `Suggested: ${bin}` : "No assigned bin — scan to assign"}
-                      </div>
-                    </div>
-                    <div style={{ fontSize: 14, fontWeight: 700, ...mono, color: done ? "#22c55e" : "#e2e8f0" }}>
-                      ×{item.qty} {done && "✓"}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-
-          <button style={{ ...S.btn, background: "#22c55e", marginTop: 12 }} onClick={finishPutaway}>
-            {putawayCompleteCount >= putawayTotalCount ? "All Done → Summary" : `Done (${putawayCompleteCount}/${putawayTotalCount} shelved)`}
-          </button>
-          <button style={{ ...S.btnSec, marginTop: 8 }} onClick={skipStage}>Skip for now</button>
-        </div>
-      </div>
-    );
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // RENDER: PHASE 5 — SUMMARY
+  // RENDER: SUMMARY
   // ═══════════════════════════════════════════════════════════
   if (phase === "summary") {
     // Clear session on entering summary
     clearSession(SESSION_KEY);
 
-    const sfItems = allocationPlan?.salesFloor || [];
-    const brItems = allocationPlan?.backroom || [];
-    const whItems = allocationPlan?.warehouse || [];
-    const sfTotal = sfItems.reduce((s, i) => s + i.qty, 0);
-    const brTotal = brItems.reduce((s, i) => s + i.qty, 0);
-    const whTotal = whItems.reduce((s, i) => s + i.qty, 0);
-    const pendingCount = whItems.filter(i => !putawayDone[i.item_id]).length;
+    const receivedLines = poLines.filter(l => (receivedItems[l.item_id] || 0) > 0);
+    const binsUsed = [...new Set(Object.keys(binItems).map(k => k.split("::")[0]).filter(b => b && b !== "null"))];
 
     return (
       <div style={S.root}>
@@ -929,37 +445,37 @@ export default function ItemReceipts({ onBack }) {
             <div style={{ fontSize: 14, color: "#e2e8f0", marginBottom: 8 }}>
               <strong>{totalReceived}</strong> items received on PO#{selectedPO?.po_number}
             </div>
-
-            {/* Allocation breakdown */}
-            {[
-              { label: "Sales Floor", qty: sfTotal, to: createdTOs[0], color: "#22c55e", completed: completedStages.includes(0) },
-              { label: "Backroom", qty: brTotal, to: createdTOs[1], color: "#3b82f6", completed: completedStages.includes(1) },
-            ].map(row => row.qty > 0 && (
-              <div key={row.label} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0",
-                borderTop: "1px solid rgba(255,255,255,0.04)", fontSize: 13 }}>
-                <span style={{ color: row.color }}>{row.label}: {row.qty} items</span>
-                <span style={{ color: row.completed ? "#22c55e" : "#f59e0b", ...mono, fontSize: 12 }}>
-                  {row.to ? `TO#${row.to} ✓` : row.completed ? "skipped" : "pending"}
-                </span>
-              </div>
-            ))}
-            {whTotal > 0 && (
-              <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0",
-                borderTop: "1px solid rgba(255,255,255,0.04)", fontSize: 13 }}>
-                <span style={{ color: ACCENT }}>Warehouse: {whTotal} items</span>
-                <span style={{ color: "#22c55e", ...mono, fontSize: 12 }}>
-                  {binTransferCount > 0 ? `${binTransferCount} bin transfers ✓` : completedStages.includes(2) ? "skipped" : "pending"}
-                </span>
+            {binsUsed.length > 0 && (
+              <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 4 }}>
+                Into {binsUsed.length} bin{binsUsed.length > 1 ? "s" : ""}: <span style={{ ...mono, color: "#818cf8" }}>{binsUsed.join(", ")}</span>
               </div>
             )}
+
+            {/* Per-line breakdown with the bins each item landed in */}
+            {receivedLines.map((l, i) => {
+              const itemBins = Object.entries(binItems)
+                .filter(([k]) => k.endsWith(`::${l.item_id}`))
+                .map(([k, q]) => ({ bin: k.split("::")[0], qty: q }));
+              return (
+                <div key={l.item_id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0",
+                  borderTop: "1px solid rgba(255,255,255,0.04)", fontSize: 13 }}>
+                  <div>
+                    <span style={{ ...mono, color: "#e2e8f0", fontWeight: 600 }}>{l.sku}</span>
+                    {itemBins.length > 0 && (
+                      <span style={{ ...mono, color: "#818cf8", fontSize: 10, marginLeft: 8 }}>
+                        {itemBins.map(b => `${b.bin}(${b.qty})`).join(", ")}
+                      </span>
+                    )}
+                  </div>
+                  <span style={{ ...mono, fontWeight: 700, color: "#22c55e" }}>×{receivedItems[l.item_id]}</span>
+                </div>
+              );
+            })}
           </div>
 
-          {pendingCount > 0 && (
-            <div style={{ padding: "10px 14px", background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.3)",
-              borderRadius: 8, fontSize: 13, color: "#f59e0b", marginBottom: 12 }}>
-              {pendingCount} item{pendingCount > 1 ? "s" : ""} still in receiving bins
-            </div>
-          )}
+          <div style={{ fontSize: 12, color: "#64748b", marginBottom: 12 }}>
+            Items stay in the bins you scanned. Use an Inventory Transfer to move them.
+          </div>
 
           <button style={{ ...S.btn, marginBottom: 8 }} onClick={resetModule}>Receive Another PO</button>
           <button style={S.btnSec} onClick={onBack}>Home</button>
