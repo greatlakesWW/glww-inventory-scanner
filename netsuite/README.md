@@ -14,6 +14,7 @@ Precondition for the working path: the source IF must be `shipStatus=C` (Shipped
 |---|---|---|
 | `receiveTransferOrder.js` | TO picker flow — creates IF and IR for a Transfer Order. | `NS_RESTLET_RECEIVE_TO_URL` |
 | `fulfillSalesOrder.js` | SO wave picker — creates IF for a Sales Order. Deliberately separate so SO changes can't regress the TO path. | `NS_RESTLET_FULFILL_SO_URL` |
+| `receivePurchaseOrder.js` | Item Receipts module — creates an Item Receipt for a Purchase Order with per-bin assignments. Replaces the raw REST `!transform/itemReceipt` path, which rejects bin names and treats inventoryDetail as a static sublist. | `NS_RESTLET_RECEIVE_PO_URL` |
 
 ---
 
@@ -94,6 +95,23 @@ Same five-step pattern as above, but with its own script record and deployment s
    - **Audience → Roles:** same TBA role as the TO RESTlet.
 4. **Copy External URL** from the Deployment.
 5. **Set env var on Vercel** — add `NS_RESTLET_FULFILL_SO_URL` with that URL, then redeploy.
+
+## Deploying `receivePurchaseOrder.js`
+
+Same five-step pattern, with its own script record and deployment:
+
+1. **Upload file** — File Cabinet → SuiteScripts → Add File → `receivePurchaseOrder.js`.
+2. **Create Script record** — Customization → Scripting → Scripts → New → pick the file → Create Script Record.
+   - **Name:** `Item Receipts - Receive Purchase Order`
+   - **ID:** `_itemrcpt_receive_purchase_order`
+3. **Create Deployment** — from the Script record:
+   - **Title:** `Item Receipts - Receive Purchase Order Deployment`
+   - **ID:** `_itemrcpt_receive_purchase_order_dep`
+   - **Status:** Released
+   - **Log Level:** Audit
+   - **Audience → Roles:** same TBA role as the other RESTlets. The role also needs **Transactions → Purchase Order** (view) and **Transactions → Item Receipt** (create + edit).
+4. **Copy External URL** from the Deployment.
+5. **Set env var on Vercel** — add `NS_RESTLET_RECEIVE_PO_URL` with that URL, then redeploy.
 
 ## Updating a RESTlet later
 

@@ -255,26 +255,33 @@ export default function ItemReceipts({ onBack }) {
     setReceiptSubmitting(true); setError(null);
     try {
       const assignments = getItemBinAssignments();
-      const receivedLines = poLines.filter(l => (receivedItems[l.item_id] || 0) > 0).map(l => {
-        const qty = receivedItems[l.item_id];
-        const bins = assignments[l.item_id] || [];
-        const entry = { orderLine: l.line_number, quantity: qty, itemreceive: true };
-        if (bins.length > 0) {
-          entry.inventoryDetail = {
-            inventoryAssignment: {
-              items: bins.map(b => ({ quantity: b.qty, binNumber: b.bin })),
-            },
-          };
-        }
-        return entry;
+      // Send only the received items. The RESTlet transforms PO→Item
+      // Receipt, matches lines by itemId, and marks everything else
+      // itemreceive=false on its side. Bins go by scanned name; the
+      // /api/receive-po route resolves them to internal ids (NS rejects
+      // bin names, and the receipt's inventoryDetail is a static sublist
+      // over raw REST — see netsuite/receivePurchaseOrder.js).
+      const lines = poLines
+        .filter(l => (receivedItems[l.item_id] || 0) > 0)
+        .map(l => ({
+          itemId: String(l.item_id),
+          quantity: receivedItems[l.item_id],
+          bins: (assignments[l.item_id] || []).map(b => ({ binNumber: b.bin, quantity: b.qty })),
+        }));
+      const resp = await fetch("/api/receive-po", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ purchaseOrderId: String(selectedPO.internalid), lines }),
       });
-      const unreceivedLines = poLines.filter(l => !receivedItems[l.item_id]).map(l => ({
-        orderLine: l.line_number, itemreceive: false,
-      }));
-      const result = await nsRecord("POST", `purchaseorder/${selectedPO.internalid}/!transform/itemReceipt`, {
-        item: { items: [...receivedLines, ...unreceivedLines] },
-      });
-      const rNum = result?.data?.tranId || result?.location?.split("/").pop() || "Created";
+      const text = await resp.text();
+      const data = text ? JSON.parse(text) : {};
+      if (!resp.ok) {
+        const detail = typeof data.details === "string"
+          ? data.details
+          : data.details?.["o:errorDetails"]?.[0]?.detail || data.details?.message || data.error || `API error ${resp.status}`;
+        throw new Error(detail);
+      }
+      const rNum = data?.receiptId || "Created";
       setReceiptNumber(rNum);
       setReceiptSubmitted(true);
       // Activity log
