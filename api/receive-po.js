@@ -119,8 +119,16 @@ export default async function handler(req, res) {
     if (!nsResp.ok || !data?.receiptId) {
       console.error("RESTlet receive-po failed:", nsResp.status, text.slice(0, 800));
       console.error("RESTlet receive-po payload:", JSON.stringify(restletBody));
+      // Surface NetSuite's own message + status so the app shows something
+      // actionable (a bare 403 usually means the RESTlet deployment isn't
+      // Released or the TBA role isn't in its Audience).
+      const nsMsg =
+        (data && (data.message || data.error?.message || data.error?.code || data["o:errorDetails"]?.[0]?.detail)) ||
+        (typeof data === "string" ? data.slice(0, 300) : "");
       return res.status(nsResp.status || 500).json({
-        error: "Item Receipt create failed",
+        error: nsMsg
+          ? `Item Receipt create failed (${nsResp.status}): ${nsMsg}`
+          : `Item Receipt create failed (HTTP ${nsResp.status})`,
         details: data,
       });
     }
