@@ -195,7 +195,7 @@ export default function ItemReceipts({ onBack }) {
         ORDER BY item.itemid
       `);
       // Add remaining_qty (= ordered, since we pulled all non-zero lines)
-      const lines = rows.map(r => ({ ...r, remaining_qty: Number(r.ordered_qty) || 0, received_qty: 0 }));
+      const lines = rows.map(r => ({ ...r, line_number: Number(r.line_number), remaining_qty: Number(r.ordered_qty) || 0, received_qty: 0 }));
       setPOLines(lines);
       if (lines.length === 0) setError("No lines on this PO.");
       else setPhase("receive");
