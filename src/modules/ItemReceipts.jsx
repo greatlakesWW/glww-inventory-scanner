@@ -372,11 +372,19 @@ export default function ItemReceipts({ onBack }) {
 
           {/* Item List */}
           <div style={{ marginTop: 12 }}>
-            {poLines.map((line, i) => {
+            {[...poLines]
+              .sort((a, b) => {
+                // Awaiting items stay on top; fully-received (crossed-out) sink to the bottom.
+                const aDone = (receivedItems[a.item_id] || 0) >= Number(a.remaining_qty) ? 1 : 0;
+                const bDone = (receivedItems[b.item_id] || 0) >= Number(b.remaining_qty) ? 1 : 0;
+                return aDone - bDone;
+              })
+              .map((line, i) => {
               const rcvd = receivedItems[line.item_id] || 0;
               const remaining = Number(line.remaining_qty);
               const isOver = rcvd > remaining;
               const isFull = rcvd === remaining;
+              const isDone = rcvd >= remaining; // fully received → cross out + sink to bottom
               const color = isOver ? "#a78bfa" : isFull ? "#22c55e" : rcvd > 0 ? "#e2e8f0" : "#64748b";
               // Find which bins this item is in
               const itemBins = Object.entries(binItems)
@@ -385,11 +393,11 @@ export default function ItemReceipts({ onBack }) {
 
               return (
                 <div key={line.item_id} onClick={(e) => { e.stopPropagation(); openDrawer(line.item_id); }} style={{ padding: "10px 0", borderTop: i > 0 ? "1px solid rgba(255,255,255,0.04)" : "none",
-                  opacity: rcvd === 0 ? 0.5 : 1, cursor: "pointer", touchAction: "manipulation" }}>
+                  opacity: isDone ? 0.45 : 1, cursor: "pointer", touchAction: "manipulation" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <div>
-                      <div style={{ fontSize: 13, fontWeight: 600, ...mono, color }}>{line.sku}</div>
-                      <div style={{ fontSize: 11, color: "#94a3b8" }}>{line.item_name}</div>
+                      <div style={{ fontSize: 13, fontWeight: 600, ...mono, color, textDecoration: isDone ? "line-through" : "none" }}>{line.sku}</div>
+                      <div style={{ fontSize: 11, color: "#94a3b8", textDecoration: isDone ? "line-through" : "none" }}>{line.item_name}</div>
                       {itemBins.length > 0 && (
                         <div style={{ fontSize: 10, color: "#818cf8", ...mono, marginTop: 2 }}>
                           {itemBins.map(b => `${b.bin}(${b.qty})`).join(", ")}
