@@ -161,14 +161,19 @@ export default function ItemReceipts({ onBack }) {
       const rows = await suiteql(`
         SELECT tl.id AS line_id, tl.linesequencenumber AS line_number, tl.item AS item_id,
           BUILTIN.DF(tl.item) AS item_name, tl.quantity AS ordered_qty,
+          tl.quantityreceived AS received_qty,
           item.itemid AS sku, item.upccode AS upc
         FROM transactionline tl JOIN item ON tl.item = item.id
         WHERE tl.transaction = ${poId} AND tl.mainline = 'F'
           AND tl.item IS NOT NULL AND tl.quantity > 0
         ORDER BY item.itemid
       `);
-      // Add remaining_qty (= ordered, since we pulled all non-zero lines)
-      const lines = rows.map(r => ({ ...r, line_number: Number(r.line_number), remaining_qty: Number(r.ordered_qty) || 0, received_qty: 0 }));
+      // remaining_qty = ordered minus whatever was already received on prior IRs.
+      const lines = rows.map(r => {
+        const ordered = Number(r.ordered_qty) || 0;
+        const received = Number(r.received_qty) || 0;
+        return { ...r, line_number: Number(r.line_number), ordered_qty: ordered, received_qty: received, remaining_qty: Math.max(0, ordered - received) };
+      });
       setPOLines(lines);
       if (lines.length === 0) setError("No lines on this PO.");
       else setPhase("receive");
@@ -375,17 +380,19 @@ export default function ItemReceipts({ onBack }) {
             {[...poLines]
               .sort((a, b) => {
                 // Awaiting items stay on top; fully-received (crossed-out) sink to the bottom.
-                const aDone = (receivedItems[a.item_id] || 0) >= Number(a.remaining_qty) ? 1 : 0;
-                const bDone = (receivedItems[b.item_id] || 0) >= Number(b.remaining_qty) ? 1 : 0;
+                const aDone = (Number(a.received_qty) || 0) + (receivedItems[a.item_id] || 0) >= Number(a.ordered_qty) ? 1 : 0;
+                const bDone = (Number(b.received_qty) || 0) + (receivedItems[b.item_id] || 0) >= Number(b.ordered_qty) ? 1 : 0;
                 return aDone - bDone;
               })
               .map((line, i) => {
-              const rcvd = receivedItems[line.item_id] || 0;
-              const remaining = Number(line.remaining_qty);
-              const isOver = rcvd > remaining;
-              const isFull = rcvd === remaining;
-              const isDone = rcvd >= remaining; // fully received → cross out + sink to bottom
-              const color = isOver ? "#a78bfa" : isFull ? "#22c55e" : rcvd > 0 ? "#e2e8f0" : "#64748b";
+              const ordered = Number(line.ordered_qty);
+              const prevReceived = Number(line.received_qty) || 0; // received on earlier IRs
+              const sessionRcvd = receivedItems[line.item_id] || 0; // scanned this session
+              const rcvd = prevReceived + sessionRcvd; // total received against the PO line
+              const isOver = rcvd > ordered;
+              const isFull = rcvd === ordered;
+              const isDone = rcvd >= ordered; // fully received here or on a prior IR → cross out + sink
+              const color = isOver ? "#a78bfa" : isFull ? "#22c55e" : sessionRcvd > 0 ? "#e2e8f0" : "#64748b";
               // Find which bins this item is in
               const itemBins = Object.entries(binItems)
                 .filter(([k]) => k.endsWith(`::${line.item_id}`))
@@ -407,7 +414,7 @@ export default function ItemReceipts({ onBack }) {
                     <div style={{ textAlign: "right", display: "flex", alignItems: "center", gap: 8 }}>
                       {isOver && <OverBadge />}
                       <div style={{ fontSize: 16, fontWeight: 700, ...mono, color }}>
-                        {rcvd}/{remaining} {isFull && "✓"}
+                        {rcvd}/{ordered} {isFull && "✓"}
                       </div>
                     </div>
                   </div>
