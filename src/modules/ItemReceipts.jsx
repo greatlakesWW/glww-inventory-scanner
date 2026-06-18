@@ -161,7 +161,7 @@ export default function ItemReceipts({ onBack }) {
       const rows = await suiteql(`
         SELECT tl.id AS line_id, tl.linesequencenumber AS line_number, tl.item AS item_id,
           BUILTIN.DF(tl.item) AS item_name, tl.quantity AS ordered_qty,
-          tl.quantityreceived AS received_qty,
+          tl.quantityshiprecv AS received_qty,
           item.itemid AS sku, item.upccode AS upc
         FROM transactionline tl JOIN item ON tl.item = item.id
         WHERE tl.transaction = ${poId} AND tl.mainline = 'F'
