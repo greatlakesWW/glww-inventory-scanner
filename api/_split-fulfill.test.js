@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeSplitPlan } from "./_split-fulfill.js";
+import { computeSplitPlan, shapeAvailabilityRows } from "./_split-fulfill.js";
 
 const line = (over = {}) => ({ itemId: "100", qtyRemaining: 2, committedLocationId: "3", ...over });
 
@@ -60,5 +60,19 @@ describe("computeSplitPlan", () => {
     expect(r.needsSplit).toBe(true);
     expect(r.splitLines.find((l) => l.itemId === "100").allocations).toEqual([]);
     expect(r.splitLines.find((l) => l.itemId === "200").allocations.length).toBe(1);
+  });
+});
+
+describe("shapeAvailabilityRows", () => {
+  it("groups SuiteQL rows into availByItem keyed by item id", () => {
+    const rows = [
+      { item_id: "100", location_id: "1", loc_name: "Sales Floor", avail: "1" },
+      { item_id: "100", location_id: "2", loc_name: "Backroom", avail: "1" },
+      { item_id: "200", location_id: "1", loc_name: "Sales Floor", avail: "3" },
+    ];
+    const out = shapeAvailabilityRows(rows);
+    expect(out["100"].length).toBe(2);
+    expect(out["100"][0]).toEqual({ locationId: "1", locationName: "Sales Floor", available: 1 });
+    expect(out["200"][0].available).toBe(3);
   });
 });
