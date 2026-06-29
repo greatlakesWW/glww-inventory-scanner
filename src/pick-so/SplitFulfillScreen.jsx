@@ -167,7 +167,11 @@ export default function SplitFulfillScreen({ order, onDone, onBack }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           itemId: line.itemId,
-          completesOrder: extraLines.length === 0,
+          // Only mark the order shipped-complete when this split fully
+          // covers it: no unhandled extra split lines AND no bin-level
+          // shortage. Otherwise ship what we have and leave it Partially
+          // Fulfilled so the owed units aren't silently closed out.
+          completesOrder: extraLines.length === 0 && shortByLoc.length === 0,
           allocations,
         }),
       });

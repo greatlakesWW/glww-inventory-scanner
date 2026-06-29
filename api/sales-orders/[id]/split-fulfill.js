@@ -32,7 +32,7 @@ export default async function handler(req, res) {
 
   const soId = req.query?.id;
   if (!soId || typeof soId !== "string") {
-    return res.status(400).json({ error: "Missing sessionId path param" });
+    return res.status(400).json({ error: "Missing SO id path param" });
   }
 
   const restletUrl = process.env.NS_RESTLET_FULFILL_SO_URL;
