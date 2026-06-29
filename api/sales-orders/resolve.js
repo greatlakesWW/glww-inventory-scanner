@@ -1,4 +1,5 @@
 import { runSuiteQL } from "../_suiteql.js";
+import { loadAvailabilityByItem, computeSplitPlan } from "../_split-fulfill.js";
 import { loadSOPerLocationRemaining } from "../_so-fulfillment.js";
 import { mapWithConcurrency } from "../_concurrency.js";
 
@@ -236,6 +237,54 @@ export default async function handler(req, res) {
           if (!unresolved.includes(k)) unresolved.push(k);
         }
       }
+    }
+
+    // ─── Cross-location split detection ───
+    // For each resolved order, decide if any line is short at its
+    // committed location but coverable across other locations. Failure
+    // here must NOT break the scan screen — fall back to untagged.
+    try {
+      // Per-item, per-location remaining lines for all resolved SOs.
+      // (perLocation aggregates qty per location but not per item;
+      // computeSplitPlan needs per-(item,location) granularity, so we
+      // re-query the lines grouped by item + location here.)
+      const allIds = resolved.map((r) => Number(r.id)).filter(Number.isInteger);
+      const { items: splitLineRows } = await runSuiteQL(`
+        SELECT
+          tl.transaction AS so_id,
+          tl.item AS item_id,
+          tl.location AS location_id,
+          SUM(ABS(tl.quantity)) AS qty
+        FROM transactionline tl
+        WHERE tl.transaction IN (${allIds.join(",")})
+          AND tl.mainline = 'F'
+          AND tl.itemtype IN ('InvtPart', 'Assembly', 'Kit')
+          AND ABS(tl.quantity) > 0
+        GROUP BY tl.transaction, tl.item, tl.location
+      `);
+      const lineSpecsBySo = {};
+      const allItemIds = new Set();
+      for (const row of splitLineRows) {
+        const sid = String(row.so_id);
+        (lineSpecsBySo[sid] ||= []).push({
+          itemId: String(row.item_id),
+          committedLocationId: String(row.location_id),
+          qtyRemaining: Number(row.qty) || 0,
+        });
+        allItemIds.add(String(row.item_id));
+      }
+
+      const availByItem = await loadAvailabilityByItem([...allItemIds]);
+
+      for (const r of resolved) {
+        const specs = lineSpecsBySo[r.id] || [];
+        const plan = computeSplitPlan(specs, availByItem);
+        r.needsSplit = plan.needsSplit;
+        r.splitPlan = plan.needsSplit ? plan.splitLines.filter((l) => l.allocations.length > 0) : [];
+      }
+    } catch (e) {
+      console.warn("resolve: split detection failed (non-fatal):", e?.message);
+      for (const r of resolved) { r.needsSplit = false; r.splitPlan = []; }
     }
 
     return res.status(200).json({ resolved, unresolved });

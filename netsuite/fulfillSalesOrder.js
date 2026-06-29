@@ -30,6 +30,8 @@
  *   "lines": [                           // required, non-empty
  *     {
  *       "itemId": "7566",
+ *       "locationId": "3",         // optional — overrides the IF line's
+ *                                  // location (cross-location fulfill).
  *       "bins": [
  *         { "binId": "2995", "quantity": 1 },
  *         { "binId": "3106", "quantity": 2 }
@@ -65,6 +67,9 @@ define(['N/record', 'N/search', 'N/log'], function (record, search, log) {
 
       if (spec && spec.totalQty > 0) {
         ff.setCurrentSublistValue({ sublistId: 'item', fieldId: 'itemreceive', value: true });
+        if (spec.locationId) {
+          ff.setCurrentSublistValue({ sublistId: 'item', fieldId: 'location', value: spec.locationId });
+        }
         ff.setCurrentSublistValue({ sublistId: 'item', fieldId: 'quantity', value: spec.totalQty });
 
         var invDetail = ff.getCurrentSublistSubrecord({
@@ -148,7 +153,10 @@ define(['N/record', 'N/search', 'N/log'], function (record, search, log) {
       var L = lines[fi];
       var iid = L.itemId != null ? String(L.itemId) : '';
       if (!iid) { continue; }
-      if (!specByItemId[iid]) { specByItemId[iid] = { totalQty: 0, bins: [] }; }
+      if (!specByItemId[iid]) { specByItemId[iid] = { totalQty: 0, bins: [], locationId: null }; }
+      if (L.locationId != null && String(L.locationId) !== "") {
+        specByItemId[iid].locationId = String(L.locationId);
+      }
 
       if (Array.isArray(L.bins)) {
         for (var bi = 0; bi < L.bins.length; bi++) {

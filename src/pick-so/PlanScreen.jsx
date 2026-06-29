@@ -43,7 +43,7 @@ function loadPlan() {
   };
 }
 
-export default function PlanScreen({ onPickAtLocation, onBrowseByLocation, onBack, completionSignal }) {
+export default function PlanScreen({ onPickAtLocation, onBrowseByLocation, onStartSplit, onBack, completionSignal, splitCompletionSignal }) {
   const persisted = useMemo(loadPlan, []);
   const [pickerName, setPickerName] = useState(() => persisted?.pickerName || loadSession(PICKER_NAME_KEY) || "");
   const [scanned, setScanned] = useState(() => persisted?.scanned || []);
@@ -68,6 +68,15 @@ export default function PlanScreen({ onPickAtLocation, onBrowseByLocation, onBac
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [completionSignal?.n]);
 
+  // When a split-fulfill completes (or partially completes) for an
+  // order, drop it from the plan so the picker doesn't re-open it. The
+  // parent bumps `splitCompletionSignal.n` to refire reliably.
+  useEffect(() => {
+    if (!splitCompletionSignal?.orderId || !splitCompletionSignal?.n) return;
+    setResolved((prev) => prev.filter((o) => o.id !== splitCompletionSignal.orderId));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [splitCompletionSignal?.n]);
+
   // Persist on every meaningful change.
   useEffect(() => {
     if (scanned.length === 0 && resolved.length === 0 && unresolved.length === 0) {
@@ -84,11 +93,18 @@ export default function PlanScreen({ onPickAtLocation, onBrowseByLocation, onBac
     });
   }, [pickerName, scanned, resolved, unresolved, completedLocations, persisted?.startedAt]);
 
+  // Orders the resolve endpoint flagged as needing a cross-location
+  // split. These are pulled OUT of the normal per-location grouping
+  // (below) so they don't show as a dead-end card at their committed
+  // location — they get their own pile + the dedicated split tool.
+  const splitOrders = useMemo(() => resolved.filter((o) => o.needsSplit), [resolved]);
+
   // Group resolved orders by location. Each SO can show up under
   // multiple locations if its lines are split across them.
   const ordersByLocation = useMemo(() => {
     const map = {}; // locationId -> { locationId, locationName, orders: [{order, lineCount, totalQty}] }
     for (const o of resolved) {
+      if (o.needsSplit) continue; // handled by the split pile, not normal waves
       for (const pl of o.perLocation || []) {
         if (!pl.locationId) continue;
         if (!map[pl.locationId]) {
@@ -324,8 +340,50 @@ export default function PlanScreen({ onPickAtLocation, onBrowseByLocation, onBac
             </div>
           )}
 
+          {/* Split-across-locations pile */}
+          {splitOrders.length > 0 && (
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: WARN, marginBottom: 6, letterSpacing: 0.3 }}>
+                ⚠ SPLIT ACROSS LOCATIONS ({splitOrders.length})
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {splitOrders.map((o) => (
+                  <button
+                    key={o.id}
+                    onClick={() => onStartSplit(o)}
+                    style={{
+                      ...S.card,
+                      padding: 12,
+                      width: "100%",
+                      textAlign: "left",
+                      cursor: "pointer",
+                      border: `1px solid ${WARN}45`,
+                      background: `${WARN}0c`,
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: "#e2e8f0", ...mono }}>
+                        {o.tranId || `#${o.id}`}
+                        {o.shopifyOrderNumber ? <span style={{ color: "#64748b", fontWeight: 400 }}> · #{o.shopifyOrderNumber}</span> : null}
+                      </div>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: WARN, flexShrink: 0 }}>Split →</span>
+                    </div>
+                    <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {o.customerName || "—"} · {formatDate(o.orderDate)}
+                    </div>
+                    {(o.splitPlan || []).map((l) => (
+                      <div key={l.itemId} style={{ fontSize: 11, color: "#cbd5e1", marginTop: 4, ...mono }}>
+                        item {l.itemId}: {l.allocations.map((a) => `${a.locationName || `#${a.locationId}`} ×${a.qty}`).join("  ·  ")}
+                      </div>
+                    ))}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Per-location waves */}
-          {ordersByLocation.length === 0 && totalSOs === 0 && unresolved.length === 0 && (
+          {ordersByLocation.length === 0 && splitOrders.length === 0 && totalSOs === 0 && unresolved.length === 0 && (
             <div style={{ ...S.card, textAlign: "center", padding: 24, color: "#94a3b8" }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: "#cbd5e1", marginBottom: 4 }}>
                 Scan order numbers to begin
