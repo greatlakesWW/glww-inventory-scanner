@@ -245,6 +245,24 @@ If any probe fails, stop and revisit before building — the manual path working
 in the UI is strong but not a guarantee the scripted transform behaves
 identically.
 
+## v2 Follow-ups (deferred from v1 code review)
+
+These were identified in the v1 final code review and intentionally deferred —
+v1 ships without them. None block the single-picker exception flow.
+
+1. **Per-location availability re-check in the route** (Important). `split-fulfill.js`
+   fires per-location RESTlet calls without re-reading availability immediately
+   before each call. Per §Concurrency it should re-check and abort a location
+   whose stock a sibling action consumed, returning a clear "already taken"
+   result. Low probability on a single-picker exception path, but specified.
+2. **Partial-SO (status D) split detection** (Minor/latent). The detection query
+   in `resolve.js` uses `SUM(ABS(tl.quantity))` = ordered qty, correct only for
+   Pending (status B) SOs. For Partially Fulfilled SOs reuse
+   `loadSOPerLocationRemaining` (`api/_so-fulfillment.js`) to get remaining qty.
+3. **Activity logging** (Minor). Add `cross-location-fulfill` /
+   `cross-location-fulfill-failed` entries (mirroring the wave path's KV shortage
+   log) to the orchestration route.
+
 ## Constants / References
 
 - Resolve endpoint: `api/sales-orders/resolve.js`.
