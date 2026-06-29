@@ -3,6 +3,7 @@ import LocationPickerSO from "./LocationPickerSO";
 import SOListScreen from "./SOListScreen";
 import WavePickScreen from "./WavePickScreen";
 import PlanScreen from "./PlanScreen";
+import SplitFulfillScreen from "./SplitFulfillScreen";
 
 // ═══════════════════════════════════════════════════════════
 // PickSalesOrders — SO wave pick module root
@@ -24,6 +25,10 @@ export default function PickSalesOrders({ onBack }) {
   // re-fire even if the same locationId completes twice in a row.
   const [planCompletionSignal, setPlanCompletionSignal] = useState({ locationId: null, n: 0 });
   const [waveOriginatedFromPlan, setWaveOriginatedFromPlan] = useState(false);
+  // The order currently being split-fulfilled, and a signal back to the
+  // PlanScreen to drop an order once its split completes.
+  const [splitOrder, setSplitOrder] = useState(null);
+  const [splitCompletionSignal, setSplitCompletionSignal] = useState({ orderId: null, n: 0 });
 
   // Handlers from the PlanScreen
   const handlePickAtLocation = async ({ locationId, locationName, soIds, pickerName }) => {
@@ -92,8 +97,28 @@ export default function PickSalesOrders({ onBack }) {
       <PlanScreen
         onPickAtLocation={handlePickAtLocation}
         onBrowseByLocation={handleBrowseByLocation}
+        onStartSplit={(o) => { setSplitOrder(o); setPhase("split"); }}
         onBack={onBack}
         completionSignal={planCompletionSignal}
+        splitCompletionSignal={splitCompletionSignal}
+      />
+    );
+  }
+
+  if (phase === "split") {
+    return (
+      <SplitFulfillScreen
+        order={splitOrder}
+        onDone={(orderId, status) => {
+          // Drop the order from the plan only if it actually shipped
+          // (complete or partial). A bare back-out leaves it in place.
+          if (orderId && (status === "complete" || status === "partial")) {
+            setSplitCompletionSignal((prev) => ({ orderId: String(orderId), n: prev.n + 1 }));
+          }
+          setSplitOrder(null);
+          setPhase("plan");
+        }}
+        onBack={() => { setSplitOrder(null); setPhase("plan"); }}
       />
     );
   }
