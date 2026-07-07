@@ -72,6 +72,7 @@ export default function ItemReceipts({ onBack }) {
   const [receivedItems, setReceivedItems] = useState(saved?.receivedItems || {}); // "itemId" -> total count
   const [binItems, setBinItems] = useState(saved?.binItems || {}); // "bin::itemId" -> count
   const [flash, setFlash] = useState(null);
+  const [notOnPO, setNotOnPO] = useState(null); // raw scanned value not on the PO; blocks scanning while set
   const [receiptNumber, setReceiptNumber] = useState(saved?.receiptNumber || null);
   const [receiptSubmitting, setReceiptSubmitting] = useState(false);
   const [receiptSubmitted, setReceiptSubmitted] = useState(saved?.receiptSubmitted || false);
@@ -190,14 +191,16 @@ export default function ItemReceipts({ onBack }) {
   // PHASE 2 — RECEIVE INTO BINS
   // ═══════════════════════════════════════════════════════════
   const handleBinScan = useCallback((val) => {
+    if (notOnPO) return;
     const bin = val.trim(); if (!bin) return;
     setCurrentBin(bin);
     if (!binHistory.includes(bin)) setBinHistory(p => [...p, bin]);
-  }, [binHistory]);
+  }, [binHistory, notOnPO]);
 
   const handleItemScan = useCallback((val) => {
+    if (notOnPO) return;
     const item = findItem(val);
-    if (!item) { beepWarn(); setFlash("warn"); setTimeout(() => setFlash(null), 400); return; }
+    if (!item) { beepWarn(); setNotOnPO(val.trim()); return; }
     const binKey = `${currentBin}::${item.item_id}`;
     setBinItems(p => ({ ...p, [binKey]: (p[binKey] || 0) + 1 }));
     setReceivedItems(p => ({ ...p, [item.item_id]: (p[item.item_id] || 0) + 1 }));
@@ -209,9 +212,14 @@ export default function ItemReceipts({ onBack }) {
       beepOk(); setFlash("ok");
     }
     setTimeout(() => setFlash(null), 400);
-  }, [currentBin, receivedItems, upcLookup, skuLookup, poLines]);
+  }, [currentBin, receivedItems, upcLookup, skuLookup, poLines, notOnPO]);
 
   const switchBin = () => setCurrentBin(null);
+
+  const dismissNotOnPO = () => {
+    setNotOnPO(null);
+    setTimeout(() => scanRef.current?.focus(), 50);
+  };
 
   const totalReceived = Object.values(receivedItems).reduce((a, b) => a + b, 0);
   const totalExpected = poLines.reduce((a, l) => a + Number(l.remaining_qty), 0);
@@ -431,6 +439,24 @@ export default function ItemReceipts({ onBack }) {
             </button>
           )}
         </div>
+
+        {/* Blocking not-on-PO alert — scans are ignored until OK is tapped */}
+        {notOnPO && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", zIndex: 1000,
+            display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+            <div style={{ ...S.card, width: "100%", maxWidth: 340, textAlign: "center", padding: 24,
+              marginBottom: 0, border: "2px solid rgba(245,158,11,0.5)" }}>
+              <div style={{ fontSize: 34, marginBottom: 10 }}>⚠️</div>
+              <div style={{ fontSize: 17, fontWeight: 700, color: ACCENT, marginBottom: 8 }}>
+                Last Item Scanned is not on PO
+              </div>
+              <div style={{ fontSize: 14, color: "#94a3b8", ...mono, marginBottom: 18, wordBreak: "break-all" }}>
+                {notOnPO}
+              </div>
+              <button style={{ ...S.btn, background: ACCENT }} onClick={dismissNotOnPO}>OK</button>
+            </div>
+          </div>
+        )}
         {DrawerComponent}
       </div>
     );
