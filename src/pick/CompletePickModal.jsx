@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { S, mono } from "../shared";
 
 // ═══════════════════════════════════════════════════════════
@@ -68,6 +68,10 @@ export default function CompletePickModal({
   const [binState, setBinState] = useState("idle");
   const [validatedBin, setValidatedBin] = useState(null); // { binId, binNumber }
   const [binMessage, setBinMessage] = useState(null);
+  // Monotonic request counter: only the latest validate call may apply its
+  // result. Guards against a stale in-flight response clobbering a newer
+  // validation (or a reset from onBinChange).
+  const binReqSeq = useRef(0);
 
   const destLocId = detail?.destinationLocationId;
   const destLocName = detail?.destinationLocationName || "destination";
@@ -75,6 +79,7 @@ export default function CompletePickModal({
   const validateBin = async () => {
     const raw = binInput.trim();
     if (!raw || binState === "checking") return;
+    const seq = ++binReqSeq.current;
     setBinState("checking");
     setBinMessage(null);
     try {
@@ -82,6 +87,7 @@ export default function CompletePickModal({
         `/api/bins/validate?locationId=${encodeURIComponent(destLocId)}&binNumber=${encodeURIComponent(raw)}`
       );
       const data = await resp.json().catch(() => null);
+      if (seq !== binReqSeq.current) return; // superseded — discard
       if (resp.ok && data?.valid) {
         setValidatedBin({ binId: String(data.binId), binNumber: data.binNumber });
         setBinInput(data.binNumber); // canonical casing
@@ -99,6 +105,7 @@ export default function CompletePickModal({
         );
       }
     } catch (e) {
+      if (seq !== binReqSeq.current) return; // superseded — discard
       setValidatedBin(null);
       setBinState("error");
       setBinMessage(e.message || "Bin check failed");
@@ -106,6 +113,7 @@ export default function CompletePickModal({
   };
 
   const onBinChange = (e) => {
+    binReqSeq.current++; // invalidate any in-flight validate response
     setBinInput(e.target.value);
     setBinState("idle");
     setValidatedBin(null);

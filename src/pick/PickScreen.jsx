@@ -247,8 +247,10 @@ export default function PickScreen({ to, onBack }) {
   }, [currentBin, lookups, pickedByLine, recordScan, doFlash, showError, showWarn]);
 
   // Keep scan inputs focused when their respective phase is live.
-  useScanRefocus(binScanRef, phase === "active" && !currentBin);
-  useScanRefocus(itemScanRef, phase === "active" && !!currentBin);
+  // Gated off while the Complete Pick modal is open — its document-level
+  // click handler would otherwise steal focus from the modal's bin input.
+  useScanRefocus(binScanRef, phase === "active" && !currentBin && !showCompleteModal);
+  useScanRefocus(itemScanRef, phase === "active" && !!currentBin && !showCompleteModal);
 
   // ─── Small presentational helpers ───
   // Pick list is ordered to match the physical walk through the warehouse:

@@ -79,7 +79,9 @@ describe("CompletePickModal destination bin", () => {
     });
     const { input } = renderModal();
     enterBin(input, "F-01-0002");
-    await screen.findByText(/✓/);
+    // Scoped to the bin checkmark — a bare /✓/ would match the always-present
+    // "✓ Full" StateChip immediately and not actually wait for validation.
+    await screen.findByText(/✓ F-01-0002/);
 
     fireEvent.change(input, { target: { value: "F-01-0003" } });
     expect(screen.getByText(CONFIRM_TEXT).disabled).toBe(true);
