@@ -677,7 +677,7 @@ export default function PickScreen({ to, onBack }) {
           error={sessionError}
           onConfirm={async (bin) => {
             setShowCompleteModal(false);
-            try { await completeFulfill(bin?.binNumber); } catch { /* handled in hook */ }
+            try { await completeFulfill(bin?.binNumber); } catch { /* guard errors also land here; unreachable while modal gates Confirm */ }
           }}
           onCancel={() => setShowCompleteModal(false)}
         />

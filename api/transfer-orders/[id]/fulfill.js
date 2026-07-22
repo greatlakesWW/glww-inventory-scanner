@@ -1,11 +1,12 @@
 import { kv } from "@vercel/kv";
-import { getSuiteQLConfig, runSuiteQL } from "../../_suiteql.js";
+import { getSuiteQLConfig } from "../../_suiteql.js";
 import { generateOAuthHeader } from "../../_auth.js";
 import {
   getSessionBySessionId,
   writeSession,
   deleteSession,
 } from "../../_kv.js";
+import { resolveBinAtLocation } from "../../_bins.js";
 
 // ═══════════════════════════════════════════════════════════
 // POST /api/transfer-orders/:id/fulfill  (Session 6, spec §4.6)
@@ -28,31 +29,6 @@ import {
 // ═══════════════════════════════════════════════════════════
 
 const ERROR_LOG_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days per spec §4.8
-
-// Hardcoded GLWW default: location 3 = Sales Floor → bin F-01-0001.
-// Can be overridden by the NS_SALESFLOOR_BINS_JSON env var if the setup
-// ever changes or a new destination location needs to be added.
-const SALESFLOOR_BIN_DEFAULTS = {
-  "3": "F-01-0001",
-};
-
-function parseSalesfloorBins() {
-  const raw = process.env.NS_SALESFLOOR_BINS_JSON;
-  if (raw) {
-    try {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === "object") {
-        // Merge env-var entries on top of the hardcoded defaults so the
-        // env var can add or override locations without losing the base.
-        return { ...SALESFLOOR_BIN_DEFAULTS, ...parsed };
-      }
-    } catch (_) {
-      // Malformed env var: fall back to defaults. Logged so ops can fix it.
-      console.warn("NS_SALESFLOOR_BINS_JSON is not valid JSON; using hardcoded defaults");
-    }
-  }
-  return SALESFLOOR_BIN_DEFAULTS;
-}
 
 async function readJsonResp(resp) {
   const text = await resp.text();
@@ -119,6 +95,12 @@ export default async function handler(req, res) {
   const sessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
   if (!sessionId) {
     return res.status(400).json({ error: "Missing 'sessionId' in request body" });
+  }
+
+  const destBinNumber =
+    typeof body.destBinNumber === "string" ? body.destBinNumber.trim() : "";
+  if (!destBinNumber) {
+    return res.status(400).json({ error: "Missing 'destBinNumber' in request body" });
   }
 
   // ─── Credentials up-front (throws 500 with helpful message if missing) ───
@@ -235,20 +217,21 @@ export default async function handler(req, res) {
     };
   }
 
-  // Resolve destination bin. Defaults to the hardcoded GLWW map (location 3
-  // → F-01-0001); NS_SALESFLOOR_BINS_JSON can add or override entries.
-  const salesfloorMap = parseSalesfloorBins();
-  if (!salesfloorMap || !salesfloorMap[destinationLocationId]) {
-    return res.status(500).json({
-      error:
-        "No salesfloor bin configured for destination location " +
-        destinationLocationId +
-        '. Add it via NS_SALESFLOOR_BINS_JSON env var (e.g. {"' +
-        destinationLocationId +
-        '":"BIN-NUMBER"}) or extend SALESFLOOR_BIN_DEFAULTS in api/transfer-orders/[id]/fulfill.js.',
+  // Resolve the picker-chosen destination bin BEFORE any NetSuite write.
+  // The client already validated it, but we never trust client state —
+  // and doing this first means a bad bin is a clean 400, not a stuck TO
+  // in fulfilled_pending_receipt.
+  let destBin;
+  try {
+    destBin = await resolveBinAtLocation(destBinNumber, Number(destinationLocationId));
+  } catch (e) {
+    return res.status(500).json({ error: `Destination bin lookup failed: ${e.message}` });
+  }
+  if (!destBin) {
+    return res.status(400).json({
+      error: `Bin "${destBinNumber}" not found at destination location ${destinationLocationId}. Check the bin number and try again.`,
     });
   }
-  const destBinNumber = String(salesfloorMap[destinationLocationId]);
 
   // ─── STEP 7: Create Item Fulfillment via RESTlet ───
   //
@@ -340,47 +323,22 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: `RESTlet fulfill threw: ${e.message}` });
   }
 
-  // ─── STEP 8: Persist fulfillmentId before attempting receipt ───
-  // Safety wire. Without this, a crash between fulfillment and receipt
-  // leaves an orphan IF with no way for retry-receipt to find it.
+  // Persist the bin alongside fulfillmentId so retry-receipt receives
+  // into the picker's chosen bin, not a guessed default.
+  session = {
+    ...session,
+    fulfillmentId,
+    destBinId: destBin.binId,
+    destBinNumber: destBin.binNumber,
+    updatedAt: new Date().toISOString(),
+  };
   try {
-    await writeSession({
-      ...session,
-      fulfillmentId,
-      updatedAt: new Date().toISOString(),
-    });
+    await writeSession(session);
   } catch (e) {
     console.error("Failed to persist fulfillmentId to session:", e);
   }
 
   // ─── STEP 9: Receipt via RESTlet (same RESTlet, action=receive) ───
-
-  // Resolve destination bin NAME → internal ID via SuiteQL (the RESTlet
-  // takes a bin internal id, not a name).
-  let destBinId = null;
-  try {
-    const binQ = `SELECT id, binnumber FROM Bin WHERE binnumber = '${destBinNumber.replace(/'/g, "''")}' FETCH FIRST 1 ROWS ONLY`;
-    const { items: binRows } = await runSuiteQL(binQ);
-    if (binRows && binRows[0]?.id != null) destBinId = String(binRows[0].id);
-  } catch (e) {
-    console.error("Destination bin lookup failed:", e.message);
-  }
-  if (!destBinId) {
-    try {
-      await writeSession({
-        ...session,
-        fulfillmentId,
-        status: "fulfilled_pending_receipt",
-        updatedAt: new Date().toISOString(),
-      });
-    } catch {}
-    return res.status(207).json({
-      status: "partial_success",
-      fulfillmentId,
-      errorMessage: `Could not resolve destination bin "${destBinNumber}" to an internal ID. Check the bin exists at location ${destinationLocationId}.`,
-      retryUrl: `/api/transfer-orders/${toId}/retry-receipt`,
-    });
-  }
 
   // Build RESTlet payload. The RESTlet transforms TO → IR (the only
   // programmatic receipt path this NS account permits; see the probe
@@ -400,7 +358,7 @@ export default async function handler(req, res) {
   const restletBody = {
     transferOrderId: String(toId),
     fulfillmentId: String(fulfillmentId),
-    destBinId: String(destBinId),
+    destBinId: String(destBin.binId),
     action: "receive",
     lines: restletLines,
   };
