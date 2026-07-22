@@ -1,5 +1,6 @@
 import { kv } from "@vercel/kv";
 import { getSuiteQLConfig } from "../../_suiteql.js";
+import { resolveBinAtLocation } from "../../_bins.js";
 import { generateOAuthHeader } from "../../_auth.js";
 import {
   getSessionBySessionId,
@@ -73,6 +74,7 @@ export default async function handler(req, res) {
 
   const body = req.body || {};
   const requestedSessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
+  const bodyBinNumber = typeof body.destBinNumber === "string" ? body.destBinNumber.trim() : "";
 
   let config;
   try {
@@ -153,14 +155,37 @@ export default async function handler(req, res) {
   }
 
   // Destination bin comes from the session — persisted by fulfill.js
-  // before the receipt attempt (spec §3/§4). No fallback: silently
-  // defaulting to a salesfloor bin would put stock in the wrong place.
-  const destBinId = session.destBinId != null ? String(session.destBinId) : null;
-  if (!destBinId) {
+  // before the receipt attempt (spec §3/§4). For stuck sessions that
+  // predate bin selection, an admin can pass destBinNumber in the body
+  // (resolved location-scoped). No silent salesfloor default: defaulting
+  // would put stock in the wrong place. The session bin wins over the
+  // body override to avoid ambiguity.
+  let destBinId = null;
+  if (session.destBinId != null) {
+    destBinId = String(session.destBinId);
+  } else if (bodyBinNumber) {
+    const destLocationId = to.transferLocation?.id != null ? Number(to.transferLocation.id) : null;
+    if (destLocationId == null) {
+      return res.status(502).json({ error: "TO has no destination location" });
+    }
+    let bin;
+    try {
+      bin = await resolveBinAtLocation(bodyBinNumber, destLocationId);
+    } catch (e) {
+      return res.status(500).json({ error: `Destination bin lookup failed: ${e.message}` });
+    }
+    if (!bin) {
+      return res.status(400).json({
+        error: `Bin "${bodyBinNumber}" not found at destination location ${destLocationId}`,
+      });
+    }
+    destBinId = bin.binId;
+  } else {
     return res.status(409).json({
       error:
         "Session has no destination bin recorded (it predates bin selection). " +
-        "Delete the stuck session and re-run the pick's Complete step to choose a bin.",
+        "Do NOT re-run the pick — the Item Fulfillment already exists. " +
+        'Retry this endpoint with {"destBinNumber": "<bin at the destination location>"} in the request body.',
       sessionId: session.sessionId,
       fulfillmentId,
     });

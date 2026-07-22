@@ -86,11 +86,17 @@ fixes it.
 ### 4. Retry-receipt endpoint — `api/transfer-orders/[id]/retry-receipt.js`
 
 - Reads `session.destBinId` (persisted in §3) instead of the hardcoded
-  map, which is deleted here too.
+  map, which is deleted here too. No silent salesfloor default.
 - If a stuck session lacks `destBinId` (e.g. created before this
-  deploy), return an actionable 409 error telling the operator to
-  re-run the fulfill rather than silently defaulting to a salesfloor
-  bin.
+  deploy), the operator can unstick it by passing `destBinNumber` in the
+  retry request body; it is resolved location-scoped against the TO's
+  destination location (400 if not found there). The session's
+  `destBinId`, when present, always wins over the body override.
+- With neither a session bin nor a body override, return an actionable
+  409 explaining the `destBinNumber` override. The error explicitly
+  warns NOT to re-run the pick: the Item Fulfillment already exists, so
+  re-running Complete would create a second IF and double-count
+  in-transit stock.
 
 ### 5. Error handling summary
 
