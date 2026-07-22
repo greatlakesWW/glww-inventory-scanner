@@ -15,7 +15,8 @@ import { resolveBinAtLocation } from "../../_bins.js";
 //   1. POST .../transferOrder/{id}/!transform/itemFulfillment  — creates
 //      the Item Fulfillment with per-bin inventoryDetail.
 //   2. POST .../itemFulfillment/{ffId}/!transform/itemReceipt  — creates
-//      the Item Receipt landing stock into the destination salesfloor bin.
+//      the Item Receipt landing stock into the picker-chosen destination
+//      bin (destBinNumber in the request body, validated up front).
 //
 // Between 1 and 2 we persist fulfillmentId into the KV session so the
 // stuck-TO recovery path (Session 7) can re-attempt step 2 against a

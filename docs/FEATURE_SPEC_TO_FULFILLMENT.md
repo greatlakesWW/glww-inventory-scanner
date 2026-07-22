@@ -3,6 +3,8 @@
 **Target repo:** `greatlakesWW/glww-inventory-scanner`
 **Feature name:** Transfer Order Pick & Fulfill (working name: "Pick Mode")
 **Purpose:** Pick items listed on an open NetSuite Transfer Order from multiple backroom bins, then auto-generate the Item Fulfillment and Item Receipt to move inventory from the source location into a fixed salesfloor receiving bin and close the TO.
+
+> **Superseded (2026-07-22):** the fixed salesfloor receiving bin and the `NS_SALESFLOOR_BINS_JSON` env var described below were replaced by a picker-chosen destination bin entered in the Complete Pick modal. See `docs/superpowers/specs/2026-07-22-to-destination-bin-design.md`. Env-var and bin-mapping references in this document are historical.
 **Status:** Approved for build. Decisions in §6 are locked unless explicitly re-opened.
 
 ---
