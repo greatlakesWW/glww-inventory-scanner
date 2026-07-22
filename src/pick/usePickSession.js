@@ -316,9 +316,10 @@ export function usePickSession(toId) {
   // Flips to a terminal phase ("complete" on full success, "stuck" on 207
   // partial_success). "error" status is surfaced but phase stays "active"
   // so the picker can retry without losing scan state.
-  const completeFulfill = useCallback(async () => {
+  const completeFulfill = useCallback(async (destBinNumber) => {
     if (!session?.sessionId) throw new Error("No active session");
     if (!toId) throw new Error("Missing TO id");
+    if (!destBinNumber) throw new Error("Missing destination bin");
     setBusy(true);
     setError(null);
     setPhase("completing");
@@ -328,7 +329,7 @@ export function usePickSession(toId) {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionId: session.sessionId }),
+          body: JSON.stringify({ sessionId: session.sessionId, destBinNumber }),
         }
       );
       const data = await readJson(resp);

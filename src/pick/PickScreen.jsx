@@ -675,9 +675,9 @@ export default function PickScreen({ to, onBack }) {
           pickedByLine={pickedByLine}
           busy={busy}
           error={sessionError}
-          onConfirm={async () => {
+          onConfirm={async (bin) => {
             setShowCompleteModal(false);
-            try { await completeFulfill(); } catch { /* handled in hook */ }
+            try { await completeFulfill(bin?.binNumber); } catch { /* handled in hook */ }
           }}
           onCancel={() => setShowCompleteModal(false)}
         />
