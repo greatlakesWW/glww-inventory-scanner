@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { S, mono } from "../shared";
 
 // ═══════════════════════════════════════════════════════════
@@ -12,7 +12,7 @@ import { S, mono } from "../shared";
 //   pickedByLine  — { [lineId]: qty } from usePickSession
 //   busy          — disables Confirm while fulfill POST is in flight
 //   error         — transient string to surface below the summary
-//   onConfirm()   — fires hook.completeFulfill()
+//   onConfirm(bin) — fires hook.completeFulfill(); receives { binId, binNumber }
 //   onCancel()    — closes modal without firing
 // ═══════════════════════════════════════════════════════════
 
@@ -61,6 +61,56 @@ export default function CompletePickModal({
 
   const nothingPicked = totals.totalPicked === 0;
   const hasPartialOrUntouched = totals.partial + totals.empty > 0;
+
+  // ─── Destination bin (spec §1: type/scan + live validation) ───
+  // binState: idle | checking | valid | invalid | error
+  const [binInput, setBinInput] = useState("");
+  const [binState, setBinState] = useState("idle");
+  const [validatedBin, setValidatedBin] = useState(null); // { binId, binNumber }
+  const [binMessage, setBinMessage] = useState(null);
+
+  const destLocId = detail?.destinationLocationId;
+  const destLocName = detail?.destinationLocationName || "destination";
+
+  const validateBin = async () => {
+    const raw = binInput.trim();
+    if (!raw || binState === "checking") return;
+    setBinState("checking");
+    setBinMessage(null);
+    try {
+      const resp = await fetch(
+        `/api/bins/validate?locationId=${encodeURIComponent(destLocId)}&binNumber=${encodeURIComponent(raw)}`
+      );
+      const data = await resp.json().catch(() => null);
+      if (resp.ok && data?.valid) {
+        setValidatedBin({ binId: String(data.binId), binNumber: data.binNumber });
+        setBinInput(data.binNumber); // canonical casing
+        setBinState("valid");
+      } else if (resp.ok && data && data.valid === false) {
+        setValidatedBin(null);
+        setBinState("invalid");
+        setBinMessage(`Bin "${raw}" not found at ${destLocName}`);
+      } else {
+        setValidatedBin(null);
+        setBinState("error");
+        setBinMessage(
+          (data && typeof data === "object" && (data.error || data.message)) ||
+            `Bin check failed (${resp.status})`
+        );
+      }
+    } catch (e) {
+      setValidatedBin(null);
+      setBinState("error");
+      setBinMessage(e.message || "Bin check failed");
+    }
+  };
+
+  const onBinChange = (e) => {
+    setBinInput(e.target.value);
+    setBinState("idle");
+    setValidatedBin(null);
+    setBinMessage(null);
+  };
 
   return (
     <div
@@ -116,7 +166,15 @@ export default function CompletePickModal({
           </div>
           <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 4 }}>
             Creates an Item Fulfillment + Item Receipt in NetSuite. Stock moves
-            from source bins into the salesfloor bin.
+            from source bins into{" "}
+            {validatedBin ? (
+              <span style={{ color: GREEN, fontWeight: 600, ...mono }}>
+                {validatedBin.binNumber}
+              </span>
+            ) : (
+              "the destination bin you enter below"
+            )}
+            {" "}at {destLocName}.
           </div>
         </div>
 
@@ -217,6 +275,56 @@ export default function CompletePickModal({
             </span>
           </div>
 
+          {/* Destination bin — required before Confirm */}
+          <div style={{ marginBottom: 10 }}>
+            <div
+              style={{
+                fontSize: 11,
+                color: "#94a3b8",
+                textTransform: "uppercase",
+                letterSpacing: 0.5,
+                fontWeight: 700,
+                marginBottom: 6,
+              }}
+            >
+              Destination bin at {destLocName}
+            </div>
+            <input
+              value={binInput}
+              onChange={onBinChange}
+              onKeyDown={(e) => { if (e.key === "Enter") validateBin(); }}
+              onBlur={() => { if (binState === "idle" && binInput.trim()) validateBin(); }}
+              placeholder="Scan or type bin number…"
+              disabled={busy}
+              autoFocus
+              style={{
+                ...S.inp,
+                ...mono,
+                borderColor:
+                  binState === "valid"
+                    ? GREEN
+                    : binState === "invalid" || binState === "error"
+                    ? "#ef4444"
+                    : undefined,
+              }}
+            />
+            {binState === "checking" && (
+              <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 6 }}>
+                Checking bin…
+              </div>
+            )}
+            {binState === "valid" && validatedBin && (
+              <div style={{ fontSize: 12, color: GREEN, marginTop: 6, ...mono }}>
+                ✓ {validatedBin.binNumber}
+              </div>
+            )}
+            {(binState === "invalid" || binState === "error") && binMessage && (
+              <div style={{ fontSize: 12, color: "#ef4444", marginTop: 6 }}>
+                {binMessage}
+              </div>
+            )}
+          </div>
+
           {nothingPicked && (
             <div
               style={{
@@ -254,14 +362,17 @@ export default function CompletePickModal({
           {error && <div style={{ ...S.err, marginBottom: 10 }}>{error}</div>}
 
           <button
-            onClick={onConfirm}
-            disabled={busy || nothingPicked}
+            onClick={() => onConfirm(validatedBin)}
+            disabled={busy || nothingPicked || binState !== "valid"}
             style={{
               ...S.btn,
               background: GREEN,
               marginBottom: 8,
-              opacity: busy || nothingPicked ? 0.5 : 1,
-              cursor: busy || nothingPicked ? "not-allowed" : "pointer",
+              opacity: busy || nothingPicked || binState !== "valid" ? 0.5 : 1,
+              cursor:
+                busy || nothingPicked || binState !== "valid"
+                  ? "not-allowed"
+                  : "pointer",
             }}
           >
             {busy ? "Submitting…" : "Confirm — create fulfillment + receipt"}
