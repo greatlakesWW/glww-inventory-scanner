@@ -65,4 +65,20 @@ describe("GET /api/bins/validate", () => {
     expect(res.statusCode).toBe(500);
     expect(res.body.error).toContain("boom");
   });
+
+  it("passes through an error's own status code (e.g. 429)", async () => {
+    resolveBinAtLocation.mockRejectedValue(
+      Object.assign(new Error("too many requests"), { status: 429 })
+    );
+    const res = mockRes();
+    await handler(req({ locationId: "3", binNumber: "B-1" }), res);
+    expect(res.statusCode).toBe(429);
+    expect(res.body.error).toContain("too many requests");
+  });
+
+  it("200s on OPTIONS preflight", async () => {
+    const res = mockRes();
+    await handler({ method: "OPTIONS", query: {} }, res);
+    expect(res.statusCode).toBe(200);
+  });
 });

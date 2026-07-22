@@ -7,6 +7,10 @@ import { getSuiteQLConfig } from "../_suiteql.js";
 // Live validation for the Complete Pick modal's destination-bin
 // field. Purely advisory for UX — the fulfill endpoint re-validates
 // server-side before writing anything to NetSuite.
+//
+// Caller contract: call on Enter/blur (per scan), NOT on every
+// onChange keystroke — each call consumes NetSuite's account-wide
+// concurrency budget.
 // ═══════════════════════════════════════════════════════════
 
 export default async function handler(req, res) {
