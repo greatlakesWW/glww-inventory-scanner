@@ -1068,8 +1068,8 @@ function StuckScreen({ tranId, stuckInfo, onBack }) {
           </div>
           <div style={{ fontSize: 13, color: "#e2e8f0", marginBottom: 12 }}>
             <strong style={{ color: "#f59e0b" }}>Do NOT put the stock back</strong> — it's in
-            transit according to NetSuite. Finish putting it in the salesfloor bin and tell
-            an admin to retry the receipt.
+            transit according to NetSuite. Finish receiving it into the destination bin you
+            chose and tell an admin to retry the receipt.
           </div>
 
           {stuckInfo?.fulfillmentId && (

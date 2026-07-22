@@ -1,5 +1,5 @@
 import { kv } from "@vercel/kv";
-import { getSuiteQLConfig, runSuiteQL } from "../../_suiteql.js";
+import { getSuiteQLConfig } from "../../_suiteql.js";
 import { generateOAuthHeader } from "../../_auth.js";
 import {
   getSessionBySessionId,
@@ -25,20 +25,6 @@ import {
 // ═══════════════════════════════════════════════════════════
 
 const ERROR_LOG_TTL_SECONDS = 60 * 60 * 24 * 30;
-const SALESFLOOR_BIN_DEFAULTS = { "3": "F-01-0001" };
-
-function parseSalesfloorBins() {
-  const raw = process.env.NS_SALESFLOOR_BINS_JSON;
-  if (raw) {
-    try {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === "object") {
-        return { ...SALESFLOOR_BIN_DEFAULTS, ...parsed };
-      }
-    } catch { }
-  }
-  return SALESFLOOR_BIN_DEFAULTS;
-}
 
 async function readJsonResp(resp) {
   const text = await resp.text();
@@ -166,32 +152,17 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: `TO fetch failed: ${e.message}` });
   }
 
-  const destLoc = to.transferLocation || {};
-  const destinationLocationId = destLoc.id != null ? String(destLoc.id) : null;
-  if (!destinationLocationId) {
-    return res.status(502).json({ error: "TO has no destination location" });
-  }
-
-  // Resolve destination bin
-  const salesfloorMap = parseSalesfloorBins();
-  const destBinNumber = salesfloorMap[destinationLocationId];
-  if (!destBinNumber) {
-    return res.status(500).json({
-      error: `No salesfloor bin configured for destination location ${destinationLocationId}`,
-    });
-  }
-
-  let destBinId = null;
-  try {
-    const binQ = `SELECT id, binnumber FROM Bin WHERE binnumber = '${String(destBinNumber).replace(/'/g, "''")}' FETCH FIRST 1 ROWS ONLY`;
-    const { items: binRows } = await runSuiteQL(binQ);
-    if (binRows && binRows[0]?.id != null) destBinId = String(binRows[0].id);
-  } catch (e) {
-    console.error("Destination bin lookup failed:", e.message);
-  }
+  // Destination bin comes from the session — persisted by fulfill.js
+  // before the receipt attempt (spec §3/§4). No fallback: silently
+  // defaulting to a salesfloor bin would put stock in the wrong place.
+  const destBinId = session.destBinId != null ? String(session.destBinId) : null;
   if (!destBinId) {
-    return res.status(500).json({
-      error: `Could not resolve bin "${destBinNumber}" to internal ID`,
+    return res.status(409).json({
+      error:
+        "Session has no destination bin recorded (it predates bin selection). " +
+        "Delete the stuck session and re-run the pick's Complete step to choose a bin.",
+      sessionId: session.sessionId,
+      fulfillmentId,
     });
   }
 
