@@ -294,10 +294,9 @@ export default function BinTransfer({ onBack }) {
     if (submitting) return;
     setSubmitting(true);
     setError(null);
+    const isCrossLocation =
+      destLocation && String(destLocation.id) !== String(selectedLocation.id);
     try {
-      const isCrossLocation =
-        destLocation && String(destLocation.id) !== String(selectedLocation.id);
-
       if (isCrossLocation) {
         // One-step Inventory Transfer: stock moves source-bin → dest-bin
         // across locations instantly, no in-transit state.
@@ -319,7 +318,7 @@ export default function BinTransfer({ onBack }) {
           subsidiary: { id: "2" },
           location: { id: String(selectedLocation.id) },
           transferlocation: { id: String(destLocation.id) },
-          memo: `${sourceBin.bin_number} @ ${selectedLocation.name} to ${destBin.bin_number} @ ${destLocation.name}`.slice(0, 40),
+          memo: `${sourceBin.bin_number} to ${destBin.bin_number}`.slice(0, 40),
           inventory: { items: transferLines },
         });
       } else {
@@ -368,7 +367,9 @@ export default function BinTransfer({ onBack }) {
           module: "bin-transfer",
           action: "bin-transfer-failed",
           status: "error",
-          sourceDocument: `${sourceBin?.bin_number} → ${destBin?.bin_number}`,
+          sourceDocument: isCrossLocation
+            ? `${sourceBin?.bin_number} @ ${selectedLocation?.name} → ${destBin?.bin_number} @ ${destLocation?.name}`
+            : `${sourceBin?.bin_number} → ${destBin?.bin_number}`,
           details: `${selectedLocation?.name}: ${movingItemsList.length} items`,
           items: movingItemsList.map(i => ({ sku: i.sku, name: i.item_name, qty: i.move_qty })),
           error: e.message,

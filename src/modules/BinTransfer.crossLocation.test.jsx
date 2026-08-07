@@ -108,14 +108,17 @@ describe("submit payload branching", () => {
     fireEvent.click(screen.getByText("Confirm Transfer"));
     await screen.findByText("Bin Transfer Complete");
 
+    expect(recordCalls()).toHaveLength(1);
     const [call] = recordCalls();
     expect(call.method).toBe("POST");
     expect(call.path).toBe("bintransfer");
     expect(call.body.location).toEqual({ id: "1" });
     expect(call.body.transferlocation).toBeUndefined();
+    expect(call.body.memo).toBe("B-01-0001 to F-01-0001");
     const line = call.body.inventory.items[0];
     expect(line.item).toEqual({ id: "555" });
     expect(line.quantity).toBe(2);
+    expect(line.adjustqtyby).toBeUndefined();
     const asn = line.inventoryDetail.inventoryAssignment.items[0];
     expect(asn).toEqual({ binNumber: { id: "11" }, toBinNumber: { id: "99" }, quantity: 2 });
   });
@@ -128,14 +131,17 @@ describe("submit payload branching", () => {
     fireEvent.click(screen.getByText("Confirm Transfer"));
     await screen.findByText("Bin Transfer Complete");
 
+    expect(recordCalls()).toHaveLength(1);
     const [call] = recordCalls();
     expect(call.path).toBe("inventorytransfer");
     expect(call.body.subsidiary).toEqual({ id: "2" });
     expect(call.body.location).toEqual({ id: "1" });
     expect(call.body.transferlocation).toEqual({ id: "3" });
+    expect(call.body.memo).toBe("B-01-0001 to F-01-0001");
     const line = call.body.inventory.items[0];
     expect(line.item).toEqual({ id: "555" });
     expect(line.adjustqtyby).toBe(2);
+    expect(line.quantity).toBeUndefined();
     const asn = line.inventorydetail.inventoryAssignment.items[0];
     expect(asn).toEqual({ binNumber: { id: "11" }, toBinNumber: { id: "99" }, quantity: 2 });
   });
