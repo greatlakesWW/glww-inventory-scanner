@@ -45,6 +45,7 @@ Go to **Setup → Users/Roles → Manage Roles → New**:
 | Category | Permission | Level |
 |---|---|---|
 | Transactions | Inventory Adjustment | Full |
+| Transactions | Transfer Inventory | Full |
 | Lists | Items | View |
 | Lists | Bins | View |
 | Lists | Locations | View |

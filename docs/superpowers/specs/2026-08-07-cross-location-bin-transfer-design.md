@@ -73,7 +73,10 @@ existing `nsRecord("POST", ...)` helper (`/api/record`).
 - `subsidiary`: `{ id: "2" }`
 - `location`: source location id
 - `transferlocation`: destination location id
-- `memo`: `"<srcBin> @ <srcLoc> to <destBin> @ <destLoc>"` truncated to 40 chars
+- `memo`: `"<srcBin> to <destBin>"` truncated to 40 chars — same format as the
+  bin-transfer memo. (Location names were dropped in review: they truncated
+  away the destination bin, and the record already carries both locations in
+  `location`/`transferlocation`.)
 - `inventory.items[]`, one line per item:
   - `item`: `{ id }`
   - `adjustqtyby`: move quantity
@@ -84,6 +87,10 @@ existing `nsRecord("POST", ...)` helper (`/api/record`).
 Quantity safety is the same as today: the tally is capped at
 `quantityonhand` in the source bin, and NetSuite rejects the transaction
 server-side if stock moved between scan and submit.
+
+**Role requirement:** the `Inventory Scanner API` role needs
+**Transactions → Transfer Inventory (Full)** for the cross-location path
+(added 2026-08-07; without it NetSuite returns `INSUFFICIENT_PERMISSION`).
 
 ## Pre-Implementation Verification (must pass before any UI work)
 
