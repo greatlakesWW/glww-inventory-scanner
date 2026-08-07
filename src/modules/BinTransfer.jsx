@@ -45,6 +45,7 @@ export default function BinTransfer({ onBack }) {
 
   // ── Phase 4: Destination bin ──
   const [destBin, setDestBin] = useState(saved?.destBin || null); // { bin_id, bin_number }
+  const [destLocation, setDestLocation] = useState(saved?.destLocation || null); // { id, name }
 
   // ── Refs ──
   const scanRef = useRef(null);
@@ -65,10 +66,10 @@ export default function BinTransfer({ onBack }) {
     if (submitResult?.success) return;
     saveSession(SESSION_KEY, {
       phase, locations, selectedLocation, sourceBin, binContents,
-      moveItems, scanHistory, destBin,
+      moveItems, scanHistory, destBin, destLocation,
     });
   }, [phase, locations, selectedLocation, sourceBin, binContents,
-    moveItems, scanHistory, destBin, submitResult]);
+    moveItems, scanHistory, destBin, destLocation, submitResult]);
 
   // ── Resume handler ──
   const handleResume = () => {
@@ -82,6 +83,7 @@ export default function BinTransfer({ onBack }) {
       setMoveItems(saved.moveItems || {});
       setScanHistory(saved.scanHistory || []);
       setDestBin(saved.destBin || null);
+      setDestLocation(saved.destLocation || null);
     }
   };
   const handleFresh = () => {
@@ -242,28 +244,31 @@ export default function BinTransfer({ onBack }) {
   // ═══════════════════════════════════════════════════════════
   const handleDestBinScan = useCallback(async (val) => {
     const trimmed = val.trim();
-    if (!trimmed || !selectedLocation) return;
+    const destLoc = destLocation || selectedLocation;
+    if (!trimmed || !destLoc) return;
     setError(null);
     setLoading(true);
     try {
-      // Can't be same as source
-      if (trimmed.toUpperCase() === sourceBin?.bin_number?.toUpperCase()) {
+      const sameLocation = String(destLoc.id) === String(selectedLocation.id);
+      // Same bin is only a conflict within the same location — bin numbers
+      // can repeat across locations.
+      if (sameLocation && trimmed.toUpperCase() === sourceBin?.bin_number?.toUpperCase()) {
         beepWarn(); setFlash("warn"); setTimeout(() => setFlash(null), 400);
         setError("Destination must be different from source");
         setLoading(false);
         return;
       }
 
-      // Validate bin exists at this location via Bin table (works for empty bins too)
+      // Validate bin exists at the destination location via Bin table (works for empty bins too)
       const bins = await suiteql(`
         SELECT id AS bin_id, binnumber AS bin_number
         FROM Bin
         WHERE binnumber = '${trimmed.replace(/'/g, "''")}'
-          AND location = ${selectedLocation.id}
+          AND location = ${destLoc.id}
       `);
       if (bins.length === 0) {
         beepWarn(); setFlash("warn"); setTimeout(() => setFlash(null), 400);
-        setError(`Bin not found at ${selectedLocation.name}`);
+        setError(`Bin not found at ${destLoc.name}`);
         setLoading(false);
         return;
       }
@@ -274,7 +279,7 @@ export default function BinTransfer({ onBack }) {
     } catch (e) {
       beepWarn(); setError(`Bin lookup failed: ${e.message}`);
     } finally { setLoading(false); }
-  }, [selectedLocation, sourceBin]);
+  }, [selectedLocation, sourceBin, destLocation]);
 
   // ═══════════════════════════════════════════════════════════
   // PHASE 5 — SUBMIT
@@ -634,7 +639,10 @@ export default function BinTransfer({ onBack }) {
                 style={{ ...S.btnSec, flex: 1 }}
               >Change Source Bin</button>
               <button
-                onClick={() => setPhase("scan-dest")}
+                onClick={() => {
+                  setDestLocation(prev => prev || selectedLocation);
+                  setPhase("scan-dest");
+                }}
                 disabled={totalMoveItems === 0}
                 style={{
                   ...S.btn, flex: 1,
@@ -684,6 +692,29 @@ export default function BinTransfer({ onBack }) {
             <div style={{ textAlign: "center", marginBottom: 16 }}>
               <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>Scan Destination Bin</div>
               <div style={{ fontSize: 13, color: "#64748b" }}>Where should these items go?</div>
+            </div>
+
+            {/* To Location selector */}
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ ...S.lbl, marginBottom: 6 }}>To Location</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {locations.map(loc => {
+                  const active = String((destLocation || selectedLocation).id) === String(loc.id);
+                  return (
+                    <button
+                      key={loc.id}
+                      onClick={() => { setDestLocation(loc); setDestBin(null); setError(null); }}
+                      style={{
+                        ...S.btnSm, fontSize: 12, padding: "6px 12px",
+                        background: active ? `${ACCENT}20` : "rgba(255,255,255,0.04)",
+                        border: `1px solid ${active ? ACCENT : "rgba(255,255,255,0.08)"}`,
+                        color: active ? ACCENT : "#94a3b8",
+                        fontWeight: active ? 700 : 500,
+                      }}
+                    >{loc.name}</button>
+                  );
+                })}
+              </div>
             </div>
 
             {error && <div style={S.err}>{error}</div>}
