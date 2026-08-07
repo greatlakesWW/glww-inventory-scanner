@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
-import { render, screen, fireEvent, cleanup, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, cleanup } from "@testing-library/react";
 import BinTransfer from "./BinTransfer";
 
 const SESSION_KEY = "glww_bin_transfer";
@@ -67,7 +67,7 @@ describe("To Location selector", () => {
     scan(input, "F-01-0001");
     await screen.findByText("Review Transfer");
     const q = suiteqlQueries().pop();
-    expect(q).toContain("location = 1"); // validated against source loc
+    expect(q).toMatch(/location = 1\b/); // validated against source loc
   });
 
   it("validates against the selected destination location instead", async () => {
@@ -76,7 +76,24 @@ describe("To Location selector", () => {
     scan(input, "F-01-0001");
     await screen.findByText("Review Transfer");
     const q = suiteqlQueries().pop();
-    expect(q).toContain("location = 3");
-    expect(q).not.toContain("location = 1");
+    expect(q).toMatch(/location = 3\b/);
+    expect(q).not.toMatch(/location = 1\b/);
+  });
+});
+
+describe("same-bin rule", () => {
+  it("rejects the source bin as destination within the same location", async () => {
+    const input = renderDestScreen();
+    scan(input, "B-01-0001");
+    await screen.findByText("Destination must be different from source");
+    expect(suiteqlQueries().length).toBe(0); // rejected before any lookup
+  });
+
+  it("allows the same bin number at a different location", async () => {
+    const input = renderDestScreen();
+    fireEvent.click(screen.getByRole("button", { name: "Sales Floor" }));
+    scan(input, "B-01-0001");
+    await screen.findByText("Review Transfer");
+    expect(suiteqlQueries().pop()).toMatch(/location = 3\b/);
   });
 });

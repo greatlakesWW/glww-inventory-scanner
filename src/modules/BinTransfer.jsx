@@ -245,7 +245,7 @@ export default function BinTransfer({ onBack }) {
   const handleDestBinScan = useCallback(async (val) => {
     const trimmed = val.trim();
     const destLoc = destLocation || selectedLocation;
-    if (!trimmed || !destLoc) return;
+    if (!trimmed || !destLoc || !selectedLocation) return;
     setError(null);
     setLoading(true);
     try {
@@ -699,7 +699,7 @@ export default function BinTransfer({ onBack }) {
               <div style={{ ...S.lbl, marginBottom: 6 }}>To Location</div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                 {locations.map(loc => {
-                  const active = String((destLocation || selectedLocation).id) === String(loc.id);
+                  const active = String((destLocation || selectedLocation)?.id) === String(loc.id);
                   return (
                     <button
                       key={loc.id}
