@@ -97,3 +97,46 @@ describe("same-bin rule", () => {
     expect(suiteqlQueries().pop()).toMatch(/location = 3\b/);
   });
 });
+
+const recordCalls = () => fetchCalls.filter(c => c.url === "/api/record").map(c => c.body);
+
+describe("submit payload branching", () => {
+  it("posts a bintransfer when locations match", async () => {
+    const input = renderDestScreen();
+    scan(input, "F-01-0001");
+    await screen.findByText("Review Transfer");
+    fireEvent.click(screen.getByText("Confirm Transfer"));
+    await screen.findByText("Bin Transfer Complete");
+
+    const [call] = recordCalls();
+    expect(call.method).toBe("POST");
+    expect(call.path).toBe("bintransfer");
+    expect(call.body.location).toEqual({ id: "1" });
+    expect(call.body.transferlocation).toBeUndefined();
+    const line = call.body.inventory.items[0];
+    expect(line.item).toEqual({ id: "555" });
+    expect(line.quantity).toBe(2);
+    const asn = line.inventoryDetail.inventoryAssignment.items[0];
+    expect(asn).toEqual({ binNumber: { id: "11" }, toBinNumber: { id: "99" }, quantity: 2 });
+  });
+
+  it("posts an inventorytransfer when locations differ", async () => {
+    const input = renderDestScreen();
+    fireEvent.click(screen.getByRole("button", { name: "Sales Floor" }));
+    scan(input, "F-01-0001");
+    await screen.findByText("Review Transfer");
+    fireEvent.click(screen.getByText("Confirm Transfer"));
+    await screen.findByText("Bin Transfer Complete");
+
+    const [call] = recordCalls();
+    expect(call.path).toBe("inventorytransfer");
+    expect(call.body.subsidiary).toEqual({ id: "2" });
+    expect(call.body.location).toEqual({ id: "1" });
+    expect(call.body.transferlocation).toEqual({ id: "3" });
+    const line = call.body.inventory.items[0];
+    expect(line.item).toEqual({ id: "555" });
+    expect(line.adjustqtyby).toBe(2);
+    const asn = line.inventorydetail.inventoryAssignment.items[0];
+    expect(asn).toEqual({ binNumber: { id: "11" }, toBinNumber: { id: "99" }, quantity: 2 });
+  });
+});

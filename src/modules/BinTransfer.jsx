@@ -295,27 +295,55 @@ export default function BinTransfer({ onBack }) {
     setSubmitting(true);
     setError(null);
     try {
-      // Create bin transfer record
-      const inventoryLines = movingItemsList.map(item => ({
-        item: { id: String(item.item_id) },
-        quantity: Number(item.move_qty),
-        inventoryDetail: {
-          inventoryAssignment: {
-            items: [{
-              binNumber: { id: String(sourceBin.bin_id) },
-              toBinNumber: { id: String(destBin.bin_id) },
-              quantity: Number(item.move_qty),
-            }],
-          },
-        },
-      }));
+      const isCrossLocation =
+        destLocation && String(destLocation.id) !== String(selectedLocation.id);
 
-      await nsRecord("POST", "bintransfer", {
-        subsidiary: { id: "2" },
-        location: { id: String(selectedLocation.id) },
-        memo: `${sourceBin.bin_number} to ${destBin.bin_number}`.slice(0, 40),
-        inventory: { items: inventoryLines },
-      });
+      if (isCrossLocation) {
+        // One-step Inventory Transfer: stock moves source-bin → dest-bin
+        // across locations instantly, no in-transit state.
+        const transferLines = movingItemsList.map(item => ({
+          item: { id: String(item.item_id) },
+          adjustqtyby: Number(item.move_qty),
+          inventorydetail: {
+            inventoryAssignment: {
+              items: [{
+                binNumber: { id: String(sourceBin.bin_id) },
+                toBinNumber: { id: String(destBin.bin_id) },
+                quantity: Number(item.move_qty),
+              }],
+            },
+          },
+        }));
+
+        await nsRecord("POST", "inventorytransfer", {
+          subsidiary: { id: "2" },
+          location: { id: String(selectedLocation.id) },
+          transferlocation: { id: String(destLocation.id) },
+          memo: `${sourceBin.bin_number} @ ${selectedLocation.name} to ${destBin.bin_number} @ ${destLocation.name}`.slice(0, 40),
+          inventory: { items: transferLines },
+        });
+      } else {
+        const inventoryLines = movingItemsList.map(item => ({
+          item: { id: String(item.item_id) },
+          quantity: Number(item.move_qty),
+          inventoryDetail: {
+            inventoryAssignment: {
+              items: [{
+                binNumber: { id: String(sourceBin.bin_id) },
+                toBinNumber: { id: String(destBin.bin_id) },
+                quantity: Number(item.move_qty),
+              }],
+            },
+          },
+        }));
+
+        await nsRecord("POST", "bintransfer", {
+          subsidiary: { id: "2" },
+          location: { id: String(selectedLocation.id) },
+          memo: `${sourceBin.bin_number} to ${destBin.bin_number}`.slice(0, 40),
+          inventory: { items: inventoryLines },
+        });
+      }
 
       clearSession(SESSION_KEY);
       setSubmitResult({ success: true });
@@ -324,7 +352,9 @@ export default function BinTransfer({ onBack }) {
           module: "bin-transfer",
           action: "bin-transfer-completed",
           status: "success",
-          sourceDocument: `${sourceBin.bin_number} → ${destBin.bin_number}`,
+          sourceDocument: isCrossLocation
+            ? `${sourceBin.bin_number} @ ${selectedLocation.name} → ${destBin.bin_number} @ ${destLocation.name}`
+            : `${sourceBin.bin_number} → ${destBin.bin_number}`,
           details: `${selectedLocation.name}: ${movingItemsList.length} items, ${totalMoveScans} units`,
           items: movingItemsList.map(i => ({ sku: i.sku, name: i.item_name, qty: i.move_qty })),
         });
@@ -345,7 +375,7 @@ export default function BinTransfer({ onBack }) {
         });
       } catch (_) { }
     } finally { setSubmitting(false); }
-  }, [submitting, movingItemsList, sourceBin, destBin, selectedLocation, totalMoveScans]);
+  }, [submitting, movingItemsList, sourceBin, destBin, selectedLocation, destLocation, totalMoveScans]);
 
   const startNewTransfer = () => {
     clearSession(SESSION_KEY);
