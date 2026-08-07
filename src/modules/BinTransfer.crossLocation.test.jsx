@@ -146,3 +146,21 @@ describe("submit payload branching", () => {
     expect(asn).toEqual({ binNumber: { id: "11" }, toBinNumber: { id: "99" }, quantity: 2 });
   });
 });
+
+describe("review screen and session", () => {
+  it("shows both locations on review when they differ", async () => {
+    const input = renderDestScreen();
+    fireEvent.click(screen.getByRole("button", { name: "Sales Floor" }));
+    scan(input, "F-01-0001");
+    await screen.findByText("Review Transfer");
+    expect(screen.getByText("@ Warehouse")).toBeTruthy();
+    expect(screen.getByText("@ Sales Floor")).toBeTruthy();
+  });
+
+  it("resume restores a saved destLocation", async () => {
+    const input = renderDestScreen({ ...destSession, destLocation: LOC_SF });
+    scan(input, "F-01-0001");
+    await screen.findByText("Review Transfer");
+    expect(suiteqlQueries().pop()).toMatch(/location = 3\b/);
+  });
+});

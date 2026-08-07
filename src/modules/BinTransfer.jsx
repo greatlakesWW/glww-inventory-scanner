@@ -156,6 +156,7 @@ export default function BinTransfer({ onBack }) {
       setMoveItems({});
       setScanHistory([]);
       setDestBin(null);
+      setDestLocation(null);
       beepBin(); setFlash("bin"); setTimeout(() => setFlash(null), 400);
       setPhase("scan-items");
     } catch (e) {
@@ -385,6 +386,7 @@ export default function BinTransfer({ onBack }) {
     setMoveItems({});
     setScanHistory([]);
     setDestBin(null);
+    setDestLocation(null);
     setSubmitResult(null);
     setError(null);
     setPhase("scan-source");
@@ -665,6 +667,8 @@ export default function BinTransfer({ onBack }) {
                   setBinContents([]);
                   setMoveItems({});
                   setScanHistory([]);
+                  setDestBin(null);
+                  setDestLocation(null);
                   setPhase("scan-source");
                 }}
                 style={{ ...S.btnSec, flex: 1 }}
@@ -774,22 +778,29 @@ export default function BinTransfer({ onBack }) {
             </div>
 
             {/* From / To card */}
-            <div style={{ ...S.card, marginBottom: 12 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
-                <div>
-                  <div style={S.lbl}>From</div>
-                  <div style={{ fontSize: 18, fontWeight: 700, color: "#e2e8f0", ...mono }}>{sourceBin?.bin_number}</div>
+            {(() => {
+              const cross = destLocation && String(destLocation.id) !== String(selectedLocation.id);
+              return (
+                <div style={{ ...S.card, marginBottom: 12 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
+                    <div>
+                      <div style={S.lbl}>From</div>
+                      <div style={{ fontSize: 18, fontWeight: 700, color: "#e2e8f0", ...mono }}>{sourceBin?.bin_number}</div>
+                      {cross && <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>@ {selectedLocation?.name}</div>}
+                    </div>
+                    <div style={{ fontSize: 24, color: "#475569", alignSelf: "center" }}>→</div>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={S.lbl}>To</div>
+                      <div style={{ fontSize: 18, fontWeight: 700, color: ACCENT, ...mono }}>{destBin?.bin_number}</div>
+                      {cross && <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>@ {destLocation?.name}</div>}
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 12, color: "#64748b", textAlign: "center" }}>
+                    {cross ? `${selectedLocation?.name} → ${destLocation?.name}` : `at ${selectedLocation?.name}`}
+                  </div>
                 </div>
-                <div style={{ fontSize: 24, color: "#475569", alignSelf: "center" }}>→</div>
-                <div style={{ textAlign: "right" }}>
-                  <div style={S.lbl}>To</div>
-                  <div style={{ fontSize: 18, fontWeight: 700, color: ACCENT, ...mono }}>{destBin?.bin_number}</div>
-                </div>
-              </div>
-              <div style={{ fontSize: 12, color: "#64748b", textAlign: "center" }}>
-                at {selectedLocation?.name}
-              </div>
-            </div>
+              );
+            })()}
 
             {/* Items */}
             <div style={{ ...S.card, padding: 0, marginBottom: 12, maxHeight: "35vh", overflowY: "auto" }}>
@@ -841,7 +852,7 @@ export default function BinTransfer({ onBack }) {
               <button
                 onClick={() => {
                   setSourceBin(null); setBinContents([]); setMoveItems({});
-                  setScanHistory([]); setDestBin(null); setError(null);
+                  setScanHistory([]); setDestBin(null); setDestLocation(null); setError(null);
                   setSubmitResult(null); setPhase("scan-source");
                 }}
                 style={{ ...S.btnSec, flex: 1, color: "#f87171", borderColor: "rgba(239,68,68,0.2)" }}
