@@ -160,7 +160,7 @@ export default function Home({ setModule }) {
       </div>
 
       <div style={{ padding: "24px 16px" }}>
-        {/* Item Lookup is always at the top — used so often it gets its own utility bar. */}
+        {/* The two lookups sit above the grid — used so often they get their own utility bars. */}
         {!selectedCategory && (
           <>
           <button
