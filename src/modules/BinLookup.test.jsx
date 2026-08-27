@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, fireEvent, cleanup } from "@testing-library/react";
+import { render, screen, fireEvent, cleanup, waitFor } from "@testing-library/react";
 import BinLookup from "./BinLookup";
 
 const SESSION_KEY = "glww_bin_lookup";
@@ -272,5 +272,20 @@ describe("grouped results", () => {
     await screen.findByText("SAME");
     expect(screen.getByText("(2 avail)")).toBeTruthy();
     expect(screen.queryByText("(5 avail)")).toBeNull();
+  });
+
+  it("opens the item drawer when an item row is tapped", async () => {
+    contentRows = [itemRow("DRAWER-1", "Pants", 3)];
+    const input = renderScanScreen();
+    scan(input, "F-01-0001");
+    fireEvent.click(await screen.findByText("DRAWER-1"));
+
+    await waitFor(() => {
+      expect(fetchCalls.some(c =>
+        c.url === "/api/suiteql" &&
+        c.body.query.includes("FROM item") &&
+        c.body.query.includes("item.id = DRAWER-1")
+      )).toBe(true);
+    });
   });
 });

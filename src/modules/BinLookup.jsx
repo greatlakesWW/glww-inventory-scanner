@@ -4,7 +4,7 @@ import {
   S, FONT, ANIMATIONS, mono, fadeIn, Logo, PulsingDot, ScanInput,
   loadSession, saveSession, clearSession,
 } from "../shared";
-import ItemDetailDrawer from "../components/ItemDetail";
+import { useItemDetailDrawer } from "../components/ItemDetail";
 import { groupByClass, shouldAutoExpand } from "./binLookupGrouping";
 
 // ═══════════════════════════════════════════════════════════
@@ -30,8 +30,8 @@ export default function BinLookup({ onBack }) {
   const [progress, setProgress] = useState(0); // rows loaded so far
   const [flash, setFlash] = useState(null);
   const [expanded, setExpanded] = useState({});   // className -> open?
-  const [drawerItemId, setDrawerItemId] = useState(null);
   const scanRef = useRef(null);
+  const { openDrawer, DrawerComponent } = useItemDetailDrawer(scanRef);
   // Bumped on every scan so an in-flight (slow) scan can tell it has been
   // superseded by a newer one and drop its results instead of clobbering
   // the screen. The scanner gun can fire scans faster than suiteqlAll's
@@ -74,8 +74,8 @@ export default function BinLookup({ onBack }) {
 
   const groups = useMemo(() => groupByClass(rows), [rows]);
   const totalUnits = useMemo(
-    () => rows.reduce((sum, r) => sum + (Number(r.qty_on_hand) || 0), 0),
-    [rows]
+    () => groups.reduce((sum, g) => sum + g.unitCount, 0),
+    [groups]
   );
 
   // Reseed the open/closed state whenever a new bin's contents land.
@@ -288,7 +288,7 @@ export default function BinLookup({ onBack }) {
                       {isOpen && group.items.map((r, i) => (
                         <div
                           key={r.item_id}
-                          onClick={() => setDrawerItemId(r.item_id)}
+                          onClick={() => openDrawer(r.item_id)}
                           style={{
                             display: "flex", alignItems: "center", justifyContent: "space-between",
                             padding: "10px 14px", cursor: "pointer", touchAction: "manipulation",
@@ -323,11 +323,7 @@ export default function BinLookup({ onBack }) {
         )}
       </div>
 
-      <ItemDetailDrawer
-        itemId={drawerItemId}
-        onClose={() => setDrawerItemId(null)}
-        refocusRef={scanRef}
-      />
+      {DrawerComponent}
     </div>
   );
 }
