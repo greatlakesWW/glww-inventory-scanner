@@ -4,6 +4,7 @@ import InventoryCount from "./modules/InventoryCount";
 import TransferOrders from "./modules/TransferOrders";
 import ItemReceipts from "./modules/ItemReceipts";
 import ItemLookup from "./modules/ItemLookup";
+import BinLookup from "./modules/BinLookup";
 import BinTransfer from "./modules/BinTransfer";
 import CreateInventory from "./modules/CreateInventory";
 import PickTransferOrders from "./pick/PickTransferOrders";
@@ -16,6 +17,7 @@ export default function App() {
   const onBack = () => setModule(null);
 
   if (module === "item-lookup") return <ItemLookup onBack={onBack} />;
+  if (module === "bin-lookup") return <BinLookup onBack={onBack} />;
   if (module === "inventory-count") return <InventoryCount onBack={onBack} />;
   if (module === "transfer-orders") return <TransferOrders onBack={onBack} />;
   if (module === "bin-transfer") return <BinTransfer onBack={onBack} />;

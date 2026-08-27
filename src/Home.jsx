@@ -162,6 +162,7 @@ export default function Home({ setModule }) {
       <div style={{ padding: "24px 16px" }}>
         {/* Item Lookup is always at the top — used so often it gets its own utility bar. */}
         {!selectedCategory && (
+          <>
           <button
             onClick={() => setModule("item-lookup")}
             style={{
@@ -186,6 +187,32 @@ export default function Home({ setModule }) {
             </div>
             <div style={{ marginLeft: "auto", color: "#475569", fontSize: 18 }}>›</div>
           </button>
+
+          <button
+            onClick={() => setModule("bin-lookup")}
+            style={{
+              display: "flex", alignItems: "center", gap: 12, width: "100%",
+              padding: "14px 16px", marginBottom: 16,
+              background: "rgba(20,184,166,0.04)",
+              border: "1px solid rgba(20,184,166,0.25)",
+              borderRadius: 10, cursor: "pointer", fontFamily: "inherit",
+              textAlign: "left", transition: "all 0.15s",
+              touchAction: "manipulation", minHeight: 56,
+            }}
+          >
+            <div style={{
+              width: 40, height: 40, borderRadius: 10,
+              background: "rgba(20,184,166,0.12)", border: "1px solid rgba(20,184,166,0.25)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontSize: 20, color: "#14b8a6", flexShrink: 0,
+            }}>▤</div>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "#e2e8f0" }}>Bin Lookup</div>
+              <div style={{ fontSize: 11, color: "#64748b" }}>Scan a bin to see what's in it</div>
+            </div>
+            <div style={{ marginLeft: "auto", color: "#475569", fontSize: 18 }}>›</div>
+          </button>
+          </>
         )}
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
