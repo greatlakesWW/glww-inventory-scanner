@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import {
-  suiteql,
+  suiteql, suiteqlAll, beepOk, beepWarn, beepBin,
   S, FONT, ANIMATIONS, mono, fadeIn, Logo, PulsingDot, ScanInput,
   loadSession, saveSession, clearSession,
 } from "../shared";
@@ -23,6 +23,10 @@ export default function BinLookup({ onBack }) {
   const [locations, setLocations] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [bin, setBin] = useState(null);        // { binId, binNumber } — resolved bin
+  const [rows, setRows] = useState([]);        // contents of `bin`
+  const [progress, setProgress] = useState(0); // rows loaded so far
+  const [flash, setFlash] = useState(null);
   const scanRef = useRef(null);
 
   // Phase is derived, not stored — one source of truth.
@@ -57,6 +61,64 @@ export default function BinLookup({ onBack }) {
     clearSession(SESSION_KEY);
     setError(null);
   }, []);
+
+  const doFlash = (type) => { setFlash(type); setTimeout(() => setFlash(null), 400); };
+
+  // ── SCAN A BIN ──
+  // Two calls: resolve the bin (so "missing" and "empty" stay
+  // distinguishable), then page in its contents by internal ID.
+  const handleBinScan = useCallback(async (val) => {
+    const trimmed = val.trim();
+    if (!trimmed || !selectedLocation) return;
+
+    setError(null); setBin(null); setRows([]); setProgress(0); setLoading(true);
+
+    try {
+      const resp = await fetch(
+        `/api/bins/validate?locationId=${encodeURIComponent(selectedLocation.id)}` +
+        `&binNumber=${encodeURIComponent(trimmed)}`
+      );
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || `API error ${resp.status}`);
+
+      if (!data.valid) {
+        beepWarn(); doFlash("warn");
+        setError(`Bin "${trimmed}" doesn't exist at ${selectedLocation.name}`);
+        return;
+      }
+
+      // suiteqlAll, not suiteql: catch-all Sales Floor bins run to
+      // thousands of SKUs and the 1000-row default would silently
+      // drop everything past the cutoff.
+      const contents = await suiteqlAll(`
+        SELECT
+          ib.item AS item_id,
+          item.itemid AS sku,
+          item.displayname AS item_name,
+          BUILTIN.DF(item.class) AS class_name,
+          ib.quantityonhand AS qty_on_hand,
+          ib.quantityavailable AS qty_available
+        FROM inventorybalance ib
+        JOIN item ON ib.item = item.id
+        WHERE ib.binnumber = ${Number(data.binId)}
+          AND ib.location = ${Number(selectedLocation.id)}
+          AND ib.quantityonhand > 0
+        ORDER BY BUILTIN.DF(item.class), item.itemid
+      `, (loaded) => setProgress(loaded));
+
+      setBin({ binId: data.binId, binNumber: data.binNumber });
+      setRows(contents);
+
+      if (contents.length === 0) { beepOk(); doFlash("ok"); }
+      else { beepBin(); doFlash("bin"); }
+    } catch (e) {
+      beepWarn(); doFlash("warn");
+      setBin(null); setRows([]);
+      setError(`Bin lookup failed: ${e.message}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedLocation]);
 
   return (
     <div style={S.root}>
@@ -119,10 +181,38 @@ export default function BinLookup({ onBack }) {
               }}>
                 Scan Bin · {selectedLocation.name}
               </div>
-              <ScanInput inputRef={scanRef} onScan={() => {}} placeholder="Scan bin..." />
+              <ScanInput inputRef={scanRef} onScan={handleBinScan} placeholder="Scan bin..." flash={flash} />
+              {loading && (
+                <PulsingDot
+                  color={ACCENT}
+                  label={progress > 0 ? `Loaded ${progress.toLocaleString()} items…` : "Looking up bin…"}
+                />
+              )}
             </div>
 
             {error && <div style={S.err}>{error}</div>}
+
+            {bin && rows.length === 0 && (
+              <div style={{
+                ...S.card, textAlign: "center", padding: 20,
+                background: "rgba(245,158,11,0.06)", border: "1px solid rgba(245,158,11,0.2)",
+              }}>
+                <div style={{ fontSize: 16, fontWeight: 700, ...mono, color: "#fbbf24" }}>{bin.binNumber}</div>
+                <div style={{ fontSize: 13, color: "#94a3b8", marginTop: 6 }}>
+                  This bin is empty — 0 SKUs, 0 units.
+                </div>
+              </div>
+            )}
+
+            {bin && rows.length > 0 && (
+              <div style={S.card}>
+                {rows.map(r => (
+                  <div key={r.item_id} style={{ fontSize: 13, ...mono, color: "#e2e8f0", padding: "4px 0" }}>
+                    {r.sku}
+                  </div>
+                ))}
+              </div>
+            )}
 
             <button onClick={changeLocation} style={S.btnSec}>Change Location</button>
           </div>
