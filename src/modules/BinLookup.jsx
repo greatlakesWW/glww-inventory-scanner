@@ -28,6 +28,12 @@ export default function BinLookup({ onBack }) {
   const [progress, setProgress] = useState(0); // rows loaded so far
   const [flash, setFlash] = useState(null);
   const scanRef = useRef(null);
+  // Bumped on every scan so an in-flight (slow) scan can tell it has been
+  // superseded by a newer one and drop its results instead of clobbering
+  // the screen. The scanner gun can fire scans faster than suiteqlAll's
+  // multi-page round trips resolve, so ordering by "who started" is not
+  // safe — only "who is newest" is.
+  const scanSeq = useRef(0);
 
   // Phase is derived, not stored — one source of truth.
   const phase = selectedLocation ? "scan" : "location";
@@ -39,8 +45,8 @@ export default function BinLookup({ onBack }) {
     (async () => {
       setLoading(true);
       try {
-        const rows = await suiteql(`SELECT id, name FROM location WHERE isinactive = 'F' ORDER BY name`);
-        if (!cancelled) setLocations(rows);
+        const locs = await suiteql(`SELECT id, name FROM location WHERE isinactive = 'F' ORDER BY name`);
+        if (!cancelled) setLocations(locs);
       } catch (e) {
         if (!cancelled) setError(`Failed to load locations: ${e.message}`);
       } finally {
@@ -53,13 +59,13 @@ export default function BinLookup({ onBack }) {
   const selectLocation = useCallback((loc) => {
     setSelectedLocation(loc);
     saveSession(SESSION_KEY, { location: loc });
-    setError(null);
+    setError(null); setBin(null); setRows([]); setProgress(0);
   }, []);
 
   const changeLocation = useCallback(() => {
     setSelectedLocation(null);
     clearSession(SESSION_KEY);
-    setError(null);
+    setError(null); setBin(null); setRows([]); setProgress(0);
   }, []);
 
   const doFlash = (type) => { setFlash(type); setTimeout(() => setFlash(null), 400); };
@@ -70,6 +76,7 @@ export default function BinLookup({ onBack }) {
   const handleBinScan = useCallback(async (val) => {
     const trimmed = val.trim();
     if (!trimmed || !selectedLocation) return;
+    const seq = ++scanSeq.current;
 
     setError(null); setBin(null); setRows([]); setProgress(0); setLoading(true);
 
@@ -80,6 +87,7 @@ export default function BinLookup({ onBack }) {
       );
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || `API error ${resp.status}`);
+      if (seq !== scanSeq.current) return; // superseded by a newer scan
 
       if (!data.valid) {
         beepWarn(); doFlash("warn");
@@ -104,7 +112,8 @@ export default function BinLookup({ onBack }) {
           AND ib.location = ${Number(selectedLocation.id)}
           AND ib.quantityonhand > 0
         ORDER BY BUILTIN.DF(item.class), item.itemid
-      `, (loaded) => setProgress(loaded));
+      `, (loaded) => { if (seq === scanSeq.current) setProgress(loaded); });
+      if (seq !== scanSeq.current) return; // superseded by a newer scan
 
       setBin({ binId: data.binId, binNumber: data.binNumber });
       setRows(contents);
@@ -112,11 +121,12 @@ export default function BinLookup({ onBack }) {
       if (contents.length === 0) { beepOk(); doFlash("ok"); }
       else { beepBin(); doFlash("bin"); }
     } catch (e) {
+      if (seq !== scanSeq.current) return; // superseded by a newer scan
       beepWarn(); doFlash("warn");
       setBin(null); setRows([]);
       setError(`Bin lookup failed: ${e.message}`);
     } finally {
-      setLoading(false);
+      if (seq === scanSeq.current) setLoading(false);
     }
   }, [selectedLocation]);
 

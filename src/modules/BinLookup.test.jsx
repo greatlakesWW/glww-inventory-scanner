@@ -120,12 +120,34 @@ describe("bin scan outcomes", () => {
   });
 
   it("pages through all contents rather than taking a single page", async () => {
-    contentRows = [itemRow("A-1", "Pants", 3)];
+    const page1 = [itemRow("A-1", "Pants", 3)];
+    const page2 = [itemRow("B-2", "Shirts", 5)];
+    let call = 0;
+    global.fetch = vi.fn(async (url, opts) => {
+      fetchCalls.push({ url: String(url), body: opts?.body ? JSON.parse(opts.body) : null });
+      if (String(url).startsWith("/api/bins/validate")) {
+        return { ok: true, json: async () => validateResponse };
+      }
+      if (url === "/api/suiteql") {
+        const q = JSON.parse(opts.body).query;
+        if (q.includes("FROM location")) {
+          return { ok: true, json: async () => ({ items: [{ id: "1", name: "Warehouse" }, LOC_SF], hasMore: false }) };
+        }
+        call += 1;
+        if (call === 1) return { ok: true, json: async () => ({ items: page1, hasMore: true }) };
+        return { ok: true, json: async () => ({ items: page2, hasMore: false }) };
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
     const input = renderScanScreen();
     scan(input, "F-01-0001");
     await screen.findByText("A-1");
-    // suiteqlAll always sends an explicit offset; suiteql never does.
-    expect(contentQueries().pop().body.offset).toBe(0);
+    await screen.findByText("B-2");
+
+    const queries = contentQueries();
+    expect(queries.length).toBe(2);
+    expect(queries[0].body.offset).toBe(0);
+    expect(queries[1].body.offset).toBe(page1.length);
   });
 
   it("surfaces a failed lookup as an error and leaves no stale contents", async () => {
@@ -138,5 +160,53 @@ describe("bin scan outcomes", () => {
     scan(input, "F-02-0002");
     await screen.findByText(/Bin lookup failed: NetSuite timeout/);
     expect(screen.queryByText("A-1")).toBeNull();
+  });
+
+  it("clears stale bin contents when the location changes", async () => {
+    contentRows = [itemRow("A-1", "Pants", 3)];
+    const input = renderScanScreen();
+    scan(input, "F-01-0001");
+    await screen.findByText("A-1");
+
+    fireEvent.click(screen.getByText("Change Location"));
+    fireEvent.click(await screen.findByRole("button", { name: /Warehouse/ }));
+
+    expect(screen.queryByText("A-1")).toBeNull();
+  });
+
+  it("drops a superseded scan so a faster later scan is not overwritten by a slower earlier one", async () => {
+    let resolveAValidate;
+    const aValidateGate = new Promise(res => { resolveAValidate = res; });
+
+    global.fetch = vi.fn(async (url, opts) => {
+      const urlStr = String(url);
+      fetchCalls.push({ url: urlStr, body: opts?.body ? JSON.parse(opts.body) : null });
+      if (urlStr.startsWith("/api/bins/validate")) {
+        if (urlStr.includes("binNumber=BIN-A")) {
+          await aValidateGate;
+          return { ok: true, json: async () => ({ valid: true, binId: "10", binNumber: "BIN-A" }) };
+        }
+        return { ok: true, json: async () => ({ valid: true, binId: "20", binNumber: "BIN-B" }) };
+      }
+      if (urlStr === "/api/suiteql") {
+        const q = JSON.parse(opts.body).query;
+        if (q.includes("ib.binnumber = 10")) {
+          return { ok: true, json: async () => ({ items: [itemRow("A-SKU", "Pants", 1)], hasMore: false }) };
+        }
+        return { ok: true, json: async () => ({ items: [itemRow("B-SKU", "Pants", 1)], hasMore: false }) };
+      }
+      throw new Error(`unexpected fetch ${urlStr}`);
+    });
+
+    const input = renderScanScreen();
+    scan(input, "BIN-A");
+    scan(input, "BIN-B");
+    await screen.findByText("B-SKU");
+
+    resolveAValidate();
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(screen.queryByText("A-SKU")).toBeNull();
+    expect(screen.getByText("B-SKU")).toBeTruthy();
   });
 });
