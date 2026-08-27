@@ -2,6 +2,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen, fireEvent, cleanup, waitFor } from "@testing-library/react";
 import BinLookup from "./BinLookup";
+import { logActivity } from "../activityLog";
+
+vi.mock("../activityLog", () => ({ logActivity: vi.fn() }));
 
 const SESSION_KEY = "glww_bin_lookup";
 const LOC_SF = { id: "3", name: "Sales Floor" };
@@ -28,7 +31,7 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => { cleanup(); localStorage.clear(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); localStorage.clear(); vi.restoreAllMocks(); vi.clearAllMocks(); });
 
 describe("location picker", () => {
   it("lists locations and advances to the scan screen when one is chosen", async () => {
@@ -287,5 +290,39 @@ describe("grouped results", () => {
         c.body.query.includes("item.id = DRAWER-1")
       )).toBe(true);
     });
+  });
+});
+
+describe("activity logging", () => {
+  it("logs a lookup that found items", async () => {
+    contentRows = [itemRow("A-1", "Pants", 3), itemRow("A-2", "Gloves", 4)];
+    const input = renderScanScreen();
+    scan(input, "F-01-0001");
+    await screen.findByText("A-1");
+    expect(logActivity).toHaveBeenCalledWith(expect.objectContaining({
+      module: "bin-lookup",
+      action: "bin-lookup",
+      status: "success",
+      sourceDocument: "F-01-0001",
+      details: "F-01-0001 @ Sales Floor — 2 SKUs, 7 units",
+    }));
+  });
+
+  it("logs a lookup of an empty bin", async () => {
+    contentRows = [];
+    const input = renderScanScreen();
+    scan(input, "F-01-0001");
+    await screen.findByText(/is empty/);
+    expect(logActivity).toHaveBeenCalledWith(expect.objectContaining({
+      details: "F-01-0001 @ Sales Floor — empty",
+    }));
+  });
+
+  it("does not log a bin that does not exist", async () => {
+    validateResponse = { valid: false };
+    const input = renderScanScreen();
+    scan(input, "F-09-9999");
+    await screen.findByText(/doesn't exist at Sales Floor/);
+    expect(logActivity).not.toHaveBeenCalled();
   });
 });

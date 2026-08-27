@@ -5,6 +5,7 @@ import {
   loadSession, saveSession, clearSession,
 } from "../shared";
 import { useItemDetailDrawer } from "../components/ItemDetail";
+import { logActivity } from "../activityLog";
 import { groupByClass, shouldAutoExpand } from "./binLookupGrouping";
 
 // ═══════════════════════════════════════════════════════════
@@ -138,8 +139,21 @@ export default function BinLookup({ onBack }) {
       setBin({ binId: data.binId, binNumber: data.binNumber });
       setRows(contents);
 
+      const units = contents.reduce((sum, r) => sum + (Number(r.qty_on_hand) || 0), 0);
       if (contents.length === 0) { beepOk(); doFlash("ok"); }
       else { beepBin(); doFlash("bin"); }
+
+      try {
+        logActivity({
+          module: "bin-lookup",
+          action: "bin-lookup",
+          status: "success",
+          details: contents.length === 0
+            ? `${data.binNumber} @ ${selectedLocation.name} — empty`
+            : `${data.binNumber} @ ${selectedLocation.name} — ${contents.length} SKUs, ${units} units`,
+          sourceDocument: data.binNumber,
+        });
+      } catch (_) { }
     } catch (e) {
       if (seq !== scanSeq.current) return; // superseded by a newer scan
       beepWarn(); doFlash("warn");
