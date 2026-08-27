@@ -107,14 +107,19 @@ single "Bin is empty or not found at this location" message.
 | Valid, zero rows | `beepOk`, neutral card, "Bin **F-01-0001** is empty." Stat strip reads `0 SKUs · 0 units`. This is a correct answer, not an error. |
 | Valid, has rows | `beepBin`, grouped results, activity log entry. |
 
+Both valid outcomes write an activity log entry. Knowing an employee checked a bin
+and found it empty is as useful as knowing what they found.
+
 A thrown error from either call clears the results and renders the standard `S.err`
 card. Stale contents are never left sitting under a fresh bin's header.
 
 ## Activity Logging
 
-Each successful lookup writes
+Every lookup that resolves to a real bin writes
 `logActivity({ module: "bin-lookup", action: "bin-lookup", status: "success", details: "F-01-0001 @ Sales Floor — 247 SKUs, 1,830 units", sourceDocument: "F-01-0001" })`,
-wrapped in try/catch the way `ItemLookup` does.
+wrapped in try/catch the way `ItemLookup` does. An empty bin logs the same shape with
+`details` ending in `— empty`. A bin that does not exist at the location is not
+logged; nothing was looked up.
 
 `src/modules/ActivityLog.jsx` needs `bin-lookup` added to `MODULE_OPTIONS`,
 `ACTION_OPTIONS`, and `ACTION_LABELS`, mirroring the existing `item-lookup` entries.
@@ -124,8 +129,10 @@ wrapped in try/catch the way `ItemLookup` does.
 Vitest, TDD. Component tests carry the `// @vitest-environment jsdom` pragma used by
 the existing component tests.
 
-**Pure functions** — exported as named exports from `BinLookup.jsx` so the interesting
-logic tests without a DOM:
+**Pure functions** — `groupByClass` and `shouldAutoExpand` live in their own module,
+`src/modules/binLookupGrouping.js`, with no React import. That keeps `BinLookup.jsx`
+focused on UI and lets the rules that actually matter run in the default node test
+environment:
 
 - `groupByClass(rows)` — groups ordered by class name; "Uncategorized" pinned last
   regardless of alphabetical position; per-group SKU and unit totals correct; null,
