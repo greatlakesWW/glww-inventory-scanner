@@ -693,6 +693,8 @@ npx vitest run src/modules/BinLookup.test.jsx
 
 Expected: PASS — 10 tests (4 from Task 2, 6 new).
 
+Note: code review of Task 3 added two more regression tests (stale results on location change; overlapping scans), so the file carries 12 tests from Task 4 onward.
+
 - [ ] **Step 5: Commit**
 
 ```bash
@@ -934,7 +936,7 @@ Finally, mount the drawer as the last child inside the outermost `<div style={S.
 npx vitest run src/modules/BinLookup.test.jsx
 ```
 
-Expected: PASS — 16 tests.
+Expected: PASS — 18 tests (12 existing + 6 new).
 
 - [ ] **Step 5: Commit**
 
@@ -1071,7 +1073,7 @@ Add the label to `ACTION_LABELS`, after `"item-lookup": "Item Lookup",`:
 npx vitest run src/modules/BinLookup.test.jsx
 ```
 
-Expected: PASS — 19 tests.
+Expected: PASS — 21 tests (18 existing + 3 new).
 
 - [ ] **Step 5: Commit**
 
@@ -1179,7 +1181,7 @@ git commit -m "feat: surface Bin Lookup on the home screen"
 npm test
 ```
 
-Expected: all test files pass, including the pre-existing `BinTransfer.crossLocation`, `ItemReceipts.notOnPO`, `CompletePickModal`, `usePickSession.fulfillBody`, and the `api/` tests. Bin Lookup contributes 19 component tests plus 10 grouping tests.
+Expected: all test files pass, including the pre-existing `BinTransfer.crossLocation`, `ItemReceipts.notOnPO`, `CompletePickModal`, `usePickSession.fulfillBody`, and the `api/` tests. Bin Lookup contributes 21 component tests plus 10 grouping tests.
 
 - [ ] **Step 2: Confirm no `suiteql` regression in the new module**
 
