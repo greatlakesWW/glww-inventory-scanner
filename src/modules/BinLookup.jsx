@@ -33,11 +33,15 @@ export default function BinLookup({ onBack }) {
   const [expanded, setExpanded] = useState({});   // className -> open?
   const scanRef = useRef(null);
   const { openDrawer, DrawerComponent } = useItemDetailDrawer(scanRef);
-  // Bumped on every scan so an in-flight (slow) scan can tell it has been
-  // superseded by a newer one and drop its results instead of clobbering
-  // the screen. The scanner gun can fire scans faster than suiteqlAll's
-  // multi-page round trips resolve, so ordering by "who started" is not
-  // safe — only "who is newest" is.
+  // Bumped whenever an in-flight scan should be treated as invalid, so it
+  // can tell it has been superseded and drop its results instead of
+  // clobbering the screen. Two triggers: (1) a newer scan starts — the
+  // scanner gun can fire scans faster than suiteqlAll's multi-page round
+  // trips resolve, so ordering by "who started" is not safe, only "who is
+  // newest"; (2) the employee changes location before a scan resolves —
+  // bin numbers repeat across locations, so a stale scan's results belong
+  // to the location it was scanned under, never to whatever location is
+  // showing when it finally resolves.
   const scanSeq = useRef(0);
 
   // Phase is derived, not stored — one source of truth.
@@ -65,12 +69,20 @@ export default function BinLookup({ onBack }) {
     setSelectedLocation(loc);
     saveSession(SESSION_KEY, { location: loc });
     setError(null); setBin(null); setRows([]); setProgress(0);
+    // Changing location abandons any in-flight scan — its results, once
+    // they arrive, would belong to the old location, not this one.
+    scanSeq.current += 1;
+    setLoading(false);
   }, []);
 
   const changeLocation = useCallback(() => {
     setSelectedLocation(null);
     clearSession(SESSION_KEY);
     setError(null); setBin(null); setRows([]); setProgress(0);
+    // Changing location abandons any in-flight scan — its results, once
+    // they arrive, would belong to the old location, not this one.
+    scanSeq.current += 1;
+    setLoading(false);
   }, []);
 
   const groups = useMemo(() => groupByClass(rows), [rows]);

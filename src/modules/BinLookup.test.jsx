@@ -212,6 +212,44 @@ describe("bin scan outcomes", () => {
     expect(screen.queryByText("A-SKU")).toBeNull();
     expect(screen.getByText("B-SKU")).toBeTruthy();
   });
+
+  it("abandons an in-flight scan's results when the location changes mid-scan", async () => {
+    contentRows = [itemRow("STALE-SKU", "Pants", 3)];
+    let resolveContents;
+    const contentsGate = new Promise(res => { resolveContents = res; });
+
+    global.fetch = vi.fn(async (url, opts) => {
+      const urlStr = String(url);
+      fetchCalls.push({ url: urlStr, body: opts?.body ? JSON.parse(opts.body) : null });
+      if (urlStr.startsWith("/api/bins/validate")) {
+        return { ok: true, json: async () => validateResponse };
+      }
+      if (urlStr === "/api/suiteql") {
+        const q = JSON.parse(opts.body).query;
+        if (q.includes("FROM location")) {
+          return { ok: true, json: async () => ({ items: [{ id: "1", name: "Warehouse" }, LOC_SF], hasMore: false }) };
+        }
+        await contentsGate; // hold the contents round trip open, as if on spotty warehouse wifi
+        return { ok: true, json: async () => ({ items: contentRows, hasMore: false }) };
+      }
+      throw new Error(`unexpected fetch ${urlStr}`);
+    });
+
+    const input = renderScanScreen();
+    scan(input, "F-01-0001");
+
+    // Let the scan actually reach the contents fetch before abandoning it.
+    await waitFor(() => expect(contentQueries().length).toBe(1));
+
+    fireEvent.click(screen.getByText("Change Location"));
+    fireEvent.click(await screen.findByRole("button", { name: /Warehouse/ }));
+
+    resolveContents();
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(screen.queryByText("STALE-SKU")).toBeNull();
+    expect(screen.queryByText("F-01-0001")).toBeNull();
+  });
 });
 
 const manyRows = (n) =>
