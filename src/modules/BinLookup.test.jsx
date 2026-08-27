@@ -210,3 +210,67 @@ describe("bin scan outcomes", () => {
     expect(screen.getByText("B-SKU")).toBeTruthy();
   });
 });
+
+const manyRows = (n) =>
+  Array.from({ length: n }, (_, i) => itemRow(`SKU-${i}`, i % 2 ? "Pants" : "Gloves", 2));
+
+describe("grouped results", () => {
+  it("shows a stat strip with the bin, location, SKU count and unit count", async () => {
+    contentRows = [itemRow("A-1", "Pants", 3), itemRow("A-2", "Gloves", 4)];
+    const input = renderScanScreen();
+    scan(input, "F-01-0001");
+    await screen.findByText("F-01-0001");
+    expect(screen.getByText(/2 SKUs/)).toBeTruthy();
+    expect(screen.getByText(/7 units/)).toBeTruthy();
+    expect(screen.getByText("Sales Floor")).toBeTruthy();
+  });
+
+  it("expands every group for a small bin so items are visible without tapping", async () => {
+    contentRows = manyRows(4);
+    const input = renderScanScreen();
+    scan(input, "F-01-0001");
+    expect(await screen.findByText("SKU-0")).toBeTruthy();
+    expect(screen.getByText("SKU-3")).toBeTruthy();
+  });
+
+  it("collapses every group for a bin over the threshold", async () => {
+    contentRows = manyRows(26);
+    const input = renderScanScreen();
+    scan(input, "F-01-0001");
+    await screen.findByText("Gloves");
+    expect(screen.queryByText("SKU-0")).toBeNull();
+  });
+
+  it("opens a collapsed group when its header is tapped", async () => {
+    contentRows = manyRows(26);
+    const input = renderScanScreen();
+    scan(input, "F-01-0001");
+    fireEvent.click(await screen.findByText("Gloves"));
+    expect(screen.getByText("SKU-0")).toBeTruthy();
+  });
+
+  it("orders groups alphabetically with Uncategorized last", async () => {
+    contentRows = [itemRow("A-1", "Pants", 1), itemRow("A-2", null, 1), itemRow("A-3", "Gloves", 1)];
+    const input = renderScanScreen();
+    scan(input, "F-01-0001");
+    await screen.findByText("Gloves");
+    const headers = screen.getAllByRole("button")
+      .map(b => b.textContent)
+      .filter(t => /Gloves|Pants|Uncategorized/.test(t));
+    expect(headers[0]).toContain("Gloves");
+    expect(headers[1]).toContain("Pants");
+    expect(headers[2]).toContain("Uncategorized");
+  });
+
+  it("shows available quantity only when it differs from on hand", async () => {
+    contentRows = [
+      { item_id: 1, sku: "SAME", item_name: "Same", class_name: "Pants", qty_on_hand: 5, qty_available: 5 },
+      { item_id: 2, sku: "DIFF", item_name: "Diff", class_name: "Pants", qty_on_hand: 5, qty_available: 2 },
+    ];
+    const input = renderScanScreen();
+    scan(input, "F-01-0001");
+    await screen.findByText("SAME");
+    expect(screen.getByText("(2 avail)")).toBeTruthy();
+    expect(screen.queryByText("(5 avail)")).toBeNull();
+  });
+});

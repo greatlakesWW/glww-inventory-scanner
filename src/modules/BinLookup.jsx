@@ -1,9 +1,11 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   suiteql, suiteqlAll, beepOk, beepWarn, beepBin,
   S, FONT, ANIMATIONS, mono, fadeIn, Logo, PulsingDot, ScanInput,
   loadSession, saveSession, clearSession,
 } from "../shared";
+import ItemDetailDrawer from "../components/ItemDetail";
+import { groupByClass, shouldAutoExpand } from "./binLookupGrouping";
 
 // ═══════════════════════════════════════════════════════════
 // BIN LOOKUP MODULE — read-only "what's in this bin?"
@@ -27,6 +29,8 @@ export default function BinLookup({ onBack }) {
   const [rows, setRows] = useState([]);        // contents of `bin`
   const [progress, setProgress] = useState(0); // rows loaded so far
   const [flash, setFlash] = useState(null);
+  const [expanded, setExpanded] = useState({});   // className -> open?
+  const [drawerItemId, setDrawerItemId] = useState(null);
   const scanRef = useRef(null);
   // Bumped on every scan so an in-flight (slow) scan can tell it has been
   // superseded by a newer one and drop its results instead of clobbering
@@ -66,6 +70,22 @@ export default function BinLookup({ onBack }) {
     setSelectedLocation(null);
     clearSession(SESSION_KEY);
     setError(null); setBin(null); setRows([]); setProgress(0);
+  }, []);
+
+  const groups = useMemo(() => groupByClass(rows), [rows]);
+  const totalUnits = useMemo(
+    () => rows.reduce((sum, r) => sum + (Number(r.qty_on_hand) || 0), 0),
+    [rows]
+  );
+
+  // Reseed the open/closed state whenever a new bin's contents land.
+  useEffect(() => {
+    const open = shouldAutoExpand(rows.length);
+    setExpanded(Object.fromEntries(groups.map(g => [g.className, open])));
+  }, [groups, rows.length]);
+
+  const toggleGroup = useCallback((className) => {
+    setExpanded(prev => ({ ...prev, [className]: !prev[className] }));
   }, []);
 
   const doFlash = (type) => { setFlash(type); setTimeout(() => setFlash(null), 400); };
@@ -215,12 +235,86 @@ export default function BinLookup({ onBack }) {
             )}
 
             {bin && rows.length > 0 && (
-              <div style={S.card}>
-                {rows.map(r => (
-                  <div key={r.item_id} style={{ fontSize: 13, ...mono, color: "#e2e8f0", padding: "4px 0" }}>
-                    {r.sku}
+              <div style={fadeIn}>
+                {/* Stat strip */}
+                <div style={{
+                  ...S.card, padding: "12px 16px", marginBottom: 10,
+                  background: `${ACCENT}0f`, border: `1px solid ${ACCENT}40`,
+                  display: "flex", alignItems: "center", justifyContent: "space-between",
+                }}>
+                  <div>
+                    <div style={{ fontSize: 20, fontWeight: 700, ...mono, color: "#5eead4" }}>{bin.binNumber}</div>
+                    <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>{selectedLocation.name}</div>
                   </div>
-                ))}
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, ...mono, color: "#e2e8f0" }}>
+                      {rows.length.toLocaleString()} SKUs
+                    </div>
+                    <div style={{ fontSize: 13, fontWeight: 700, ...mono, color: "#22c55e" }}>
+                      {totalUnits.toLocaleString()} units
+                    </div>
+                  </div>
+                </div>
+
+                {/* Class groups */}
+                {groups.map(group => {
+                  const isOpen = !!expanded[group.className];
+                  return (
+                    <div key={group.className} style={{
+                      borderRadius: 10, border: "1px solid rgba(255,255,255,0.06)",
+                      background: "rgba(255,255,255,0.03)", marginBottom: 8, overflow: "hidden",
+                    }}>
+                      <button
+                        onClick={() => toggleGroup(group.className)}
+                        style={{
+                          width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between",
+                          padding: "12px 14px", background: "transparent", border: "none",
+                          cursor: "pointer", fontFamily: "inherit", textAlign: "left",
+                          touchAction: "manipulation", minHeight: 48,
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                          <span style={{ color: "#475569", fontSize: 12 }}>{isOpen ? "▾" : "▸"}</span>
+                          <span style={{
+                            fontSize: 14, fontWeight: 700, color: "#e2e8f0",
+                            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                          }}>{group.className}</span>
+                        </div>
+                        <span style={{ fontSize: 11, color: "#94a3b8", ...mono, flexShrink: 0, marginLeft: 8 }}>
+                          {group.skuCount} · {group.unitCount.toLocaleString()}u
+                        </span>
+                      </button>
+
+                      {isOpen && group.items.map((r, i) => (
+                        <div
+                          key={r.item_id}
+                          onClick={() => setDrawerItemId(r.item_id)}
+                          style={{
+                            display: "flex", alignItems: "center", justifyContent: "space-between",
+                            padding: "10px 14px", cursor: "pointer", touchAction: "manipulation",
+                            borderTop: "1px solid rgba(255,255,255,0.04)",
+                            background: i % 2 ? "rgba(255,255,255,0.01)" : "transparent",
+                            minHeight: 48,
+                          }}
+                        >
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, ...mono, color: "#e2e8f0" }}>{r.sku}</div>
+                            <div style={{
+                              fontSize: 11, color: "#64748b",
+                              whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                            }}>{r.item_name}</div>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginLeft: 12, flexShrink: 0 }}>
+                            <span style={{ fontSize: 15, fontWeight: 700, ...mono, color: "#cbd5e1" }}>{r.qty_on_hand}</span>
+                            {Number(r.qty_available) !== Number(r.qty_on_hand) && (
+                              <span style={{ fontSize: 11, color: "#64748b", ...mono }}>({r.qty_available} avail)</span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })}
               </div>
             )}
 
@@ -228,6 +322,12 @@ export default function BinLookup({ onBack }) {
           </div>
         )}
       </div>
+
+      <ItemDetailDrawer
+        itemId={drawerItemId}
+        onClose={() => setDrawerItemId(null)}
+        refocusRef={scanRef}
+      />
     </div>
   );
 }
