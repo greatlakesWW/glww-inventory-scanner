@@ -345,6 +345,18 @@ describe("over-receipt correction", () => {
     expect(overBanner()).toBe(true);
     expect(overBannerCount()).toBe(1);
     expect(readout("2/2 ✓ ⌄")).toBeTruthy();
+
+    // CAP-1 is over by two. Clear it as well so the banner can actually reach
+    // zero — that the banner disappears is the claim this feature exists to make.
+    // BOOT-1's panel closed when it hit 2/2 (no bins left to adjust), so
+    // opening CAP-1's is the only panel open from here on, making its
+    // "− BIN-A (n)" buttons unambiguous.
+    fireEvent.click(readout("3/1 ⌄"));
+    fireEvent.click(screen.getByText("− BIN-A (3)"));
+    expect(readout("2/1 ⌄")).toBeTruthy();
+    fireEvent.click(screen.getByText("− BIN-A (2)"));
+    expect(overBanner()).toBe(false);
+    expect(overBannerCount()).toBe(0);
   });
 
   it("leaves the other line's over-status alone", () => {
