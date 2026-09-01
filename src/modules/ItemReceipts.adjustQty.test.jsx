@@ -288,6 +288,20 @@ describe("removing a unit", () => {
     focusSpy.mockRestore();
   });
 
+  it("restores scan focus when the panel background is tapped", async () => {
+    renderReceiveScreen();
+    const input = screen.getByPlaceholderText("Scan item UPC...");
+    fireEvent.click(readout("3/5 ⌄"));
+    await new Promise(r => setTimeout(r, 300)); // drain the opening focus timer
+
+    // A gloved finger missing a bin button lands here. The wrapper's
+    // stopPropagation keeps useScanRefocus from firing, so it must refocus.
+    const focusSpy = vi.spyOn(input, "focus");
+    fireEvent.click(screen.getByText("Remove one from"));
+    await waitFor(() => expect(focusSpy).toHaveBeenCalled());
+    focusSpy.mockRestore();
+  });
+
   it("a removed item can be scanned back in", async () => {
     renderReceiveScreen();
     const input = screen.getByPlaceholderText("Scan item UPC...");
@@ -300,6 +314,19 @@ describe("removing a unit", () => {
     scan(input, "012345678905"); // GLV-1
     expect(progressText()).toBe("7 of 12 items");
     expect(screen.getByText("BIN-A(1)")).toBeTruthy();
+  });
+
+  it("does not reopen a stale panel when an emptied line is rescanned", async () => {
+    renderReceiveScreen();
+    const input = screen.getByPlaceholderText("Scan item UPC...");
+    fireEvent.click(readout("3/5 ⌄"));
+    fireEvent.click(screen.getByText("− BIN-B (1)"));
+    fireEvent.click(screen.getByText("− BIN-A (2)"));
+    fireEvent.click(screen.getByText("− BIN-A (1)"));
+    expect(screen.queryByText("Done")).toBeNull(); // panel closed on empty
+    await new Promise(r => setTimeout(r, 300)); // ScanInput debounces scans <100ms apart
+    scan(input, "012345678905"); // GLV-1 back in
+    expect(screen.queryByText("Done")).toBeNull(); // and it must stay closed
   });
 });
 
@@ -348,9 +375,13 @@ describe("over-receipt correction", () => {
 
     // CAP-1 is over by two. Clear it as well so the banner can actually reach
     // zero — that the banner disappears is the claim this feature exists to make.
-    // BOOT-1's panel closed when it hit 2/2 (no bins left to adjust), so
-    // opening CAP-1's is the only panel open from here on, making its
-    // "− BIN-A (n)" buttons unambiguous.
+    // BOOT-1's panel does NOT close here: binItems["BIN-A::777"] is still 2, so
+    // removeOneUnit takes the refocusScan() branch and leaves it open. It only
+    // moves off BOOT-1 because adjustingLineId holds a single line at a time —
+    // tapping CAP-1's readout re-targets it there. BOOT-1 still holds 2 in
+    // BIN-A at this point too, so the "− BIN-A (n)" query below is unambiguous
+    // only because BOOT-1's (still-open-in-state, but no longer rendered)
+    // panel isn't on screen, not because it ran out of bins.
     fireEvent.click(readout("3/1 ⌄"));
     fireEvent.click(screen.getByText("− BIN-A (3)"));
     expect(readout("2/1 ⌄")).toBeTruthy();
