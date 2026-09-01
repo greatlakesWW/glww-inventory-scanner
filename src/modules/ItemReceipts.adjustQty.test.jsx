@@ -7,10 +7,12 @@ const SESSION_KEY = "glww_item_receipts";
 
 // A saved session already in the receive phase, so the component mounts
 // straight to the item-scan screen (after clicking Resume) with no suiteql
-// network calls. Three lines cover the three cases this feature cares about:
+// network calls. Four lines cover the cases this feature cares about:
 //   GLV-1  (555) 3 units across TWO bins, ordered 5  -> adjustable, not over
 //   BOOT-1 (777) 3 units in ONE bin,      ordered 2  -> adjustable, OVER
 //   HAT-1  (999) never scanned,           ordered 4  -> not adjustable
+//   SOCK-1 (111) 3/3 received on a PRIOR receipt, 0 scanned this session
+//                                          ordered 3  -> not adjustable
 const session = {
   phase: "receive",
   openPOs: [],
@@ -22,6 +24,8 @@ const session = {
       ordered_qty: 2, received_qty: 0, remaining_qty: 2, sku: "BOOT-1", upc: "012345678912" },
     { line_id: 3, line_number: 3, item_id: 999, item_name: "Test Hat",
       ordered_qty: 4, received_qty: 0, remaining_qty: 4, sku: "HAT-1", upc: "012345678929" },
+    { line_id: 4, line_number: 4, item_id: 111, item_name: "Test Sock",
+      ordered_qty: 3, received_qty: 3, remaining_qty: 0, sku: "SOCK-1", upc: "012345678936" },
   ],
   currentBin: "BIN-A",
   binHistory: ["BIN-A", "BIN-B"],
@@ -43,6 +47,10 @@ function renderReceiveScreen() {
 const norm = (s) => (s || "").replace(/\s+/g, "");
 const readout = (label) => {
   const hits = screen.getAllByText((_, el) => el && norm(el.textContent) === norm(label));
+  // Exactly two: the flex wrapper and the inner readout div, which share
+  // textContent. More than two means two rows collide on the same label and
+  // this helper would silently target the wrong one.
+  if (hits.length > 2) throw new Error(`readout("${label}") matched ${hits.length} elements — ambiguous`);
   return hits[hits.length - 1];
 };
 const queryReadout = (label) => {
@@ -116,5 +124,13 @@ describe("adjust panel open/close", () => {
     expect(queryReadout("3/5 ⌄")).toBeNull(); // caret gone while blocked
     fireEvent.click(readout("3/5"));
     expect(screen.queryByText("− BIN-A (2)")).toBeNull();
+  });
+
+  it("a line received on a prior receipt is not adjustable", () => {
+    renderReceiveScreen();
+    // 3/3 from an earlier Item Receipt, 0 scanned this session — nothing to undo.
+    expect(queryReadout("3/3 ✓ ⌄")).toBeNull();
+    fireEvent.click(readout("3/3 ✓"));
+    expect(screen.queryByText("Done")).toBeNull();
   });
 });

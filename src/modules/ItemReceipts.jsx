@@ -222,12 +222,24 @@ export default function ItemReceipts({ onBack }) {
     setTimeout(() => scanRef.current?.focus(), 50);
   };
 
+  // stopPropagation stops useScanRefocus's document listener from firing, so
+  // any handler that calls it has to put focus back itself.
+  const refocusScan = useCallback(() => {
+    setTimeout(() => scanRef.current?.focus(), 50);
+  }, []);
+
   // Open/close a line's adjust panel. Blocked while the not-on-PO modal is up,
   // so the receiver deals with one thing at a time.
   const toggleAdjust = useCallback((itemId) => {
     if (notOnPO) return;
     setAdjustingItemId(p => (p === itemId ? null : itemId));
-  }, [notOnPO]);
+    refocusScan();
+  }, [notOnPO, refocusScan]);
+
+  const closeAdjust = useCallback(() => {
+    setAdjustingItemId(null);
+    refocusScan();
+  }, [refocusScan]);
 
   const removeOneUnit = useCallback((itemId, bin) => {}, []); // implemented in Task 2
 
@@ -416,6 +428,7 @@ export default function ItemReceipts({ onBack }) {
                 .filter(([k]) => k.endsWith(`::${line.item_id}`))
                 .map(([k, q]) => ({ bin: k.split("::")[0], qty: q }));
               const canAdjust = sessionRcvd > 0 && !notOnPO;
+              const isAdjusting = adjustingItemId === line.item_id && canAdjust;
 
               return (
                 <div key={line.item_id} onClick={(e) => { e.stopPropagation(); openDrawer(line.item_id); }} style={{ padding: "10px 0", borderTop: i > 0 ? "1px solid rgba(255,255,255,0.04)" : "none",
@@ -443,15 +456,15 @@ export default function ItemReceipts({ onBack }) {
                           touchAction: "manipulation",
                         }}
                       >
-                        {rcvd}/{ordered} {isFull && "✓"} {canAdjust && "⌄"}
+                        {rcvd}/{ordered}{isFull && " ✓"}{canAdjust && " ⌄"}
                       </div>
                     </div>
                   </div>
 
                   {/* Adjust panel — remove one unit, attributed to a bin. */}
-                  {adjustingItemId === line.item_id && (
+                  {isAdjusting && (
                     <div
-                      onClick={(e) => e.stopPropagation()}
+                      onClick={(e) => { e.stopPropagation(); refocusScan(); }}
                       style={{
                         marginTop: 8, padding: 8, borderRadius: 8,
                         background: "rgba(255,255,255,0.03)",
@@ -473,11 +486,7 @@ export default function ItemReceipts({ onBack }) {
                         </button>
                       ))}
                       <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setAdjustingItemId(null);
-                          setTimeout(() => scanRef.current?.focus(), 50);
-                        }}
+                        onClick={(e) => { e.stopPropagation(); closeAdjust(); }}
                         style={{ ...S.btnSm, display: "block", width: "100%", minHeight: 40, fontSize: 13 }}
                       >
                         Done
