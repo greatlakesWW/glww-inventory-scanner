@@ -1,18 +1,24 @@
 // @vitest-environment jsdom
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { render, screen, fireEvent, cleanup, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, cleanup, waitFor, within } from "@testing-library/react";
 import ItemReceipts from "./ItemReceipts";
 
 const SESSION_KEY = "glww_item_receipts";
 
 // A saved session already in the receive phase, so the component mounts
 // straight to the item-scan screen (after clicking Resume) with no suiteql
-// network calls. Four lines cover the cases this feature cares about:
+// network calls. Five lines cover the cases this feature cares about:
 //   GLV-1  (555) 3 units across TWO bins, ordered 5  -> adjustable, not over
-//   BOOT-1 (777) 3 units in ONE bin,      ordered 2  -> adjustable, OVER
+//   BOOT-1 (777) 3 units in ONE bin,      ordered 2  -> adjustable, OVER (by 1)
 //   HAT-1  (999) never scanned,           ordered 4  -> not adjustable
 //   SOCK-1 (111) 3/3 received on a PRIOR receipt, 0 scanned this session
 //                                          ordered 3  -> not adjustable
+//   CAP-1  (222) 3 units in ONE bin,      ordered 1  -> adjustable, OVER (by 2:
+//                removing one unit still leaves it over remaining_qty, which is
+//                what the "still over" flash test needs)
+//
+// totalExpected (sum of remaining_qty) = 5+2+4+0+1 = 12
+// totalReceived (sum of receivedItems) = 3+3+3     = 9
 const session = {
   phase: "receive",
   openPOs: [],
@@ -26,11 +32,13 @@ const session = {
       ordered_qty: 4, received_qty: 0, remaining_qty: 4, sku: "HAT-1", upc: "012345678929" },
     { line_id: 4, line_number: 4, item_id: 111, item_name: "Test Sock",
       ordered_qty: 3, received_qty: 3, remaining_qty: 0, sku: "SOCK-1", upc: "012345678936" },
+    { line_id: 5, line_number: 5, item_id: 222, item_name: "Test Cap",
+      ordered_qty: 1, received_qty: 0, remaining_qty: 1, sku: "CAP-1", upc: "012345678943" },
   ],
   currentBin: "BIN-A",
   binHistory: ["BIN-A", "BIN-B"],
-  receivedItems: { 555: 3, 777: 3 },
-  binItems: { "BIN-A::555": 2, "BIN-B::555": 1, "BIN-A::777": 3 },
+  receivedItems: { 555: 3, 777: 3, 222: 3 },
+  binItems: { "BIN-A::555": 2, "BIN-B::555": 1, "BIN-A::777": 3, "BIN-A::222": 3 },
   receiptNumber: null,
   receiptSubmitted: false,
 };
@@ -153,15 +161,15 @@ describe("adjust panel open/close", () => {
 // The "N of M items" progress readout. Function matcher because the span has
 // multiple text children, and ancestors would also regex-match textContent.
 const progressText = () =>
-  screen.getByText((_, el) => el.tagName === "SPAN" && /of 11 items$/.test(el.textContent)).textContent;
+  screen.getByText((_, el) => el.tagName === "SPAN" && /of 12 items$/.test(el.textContent)).textContent;
 
 describe("removing a unit", () => {
   it("drops the line total and the bin count by one", () => {
     renderReceiveScreen();
-    expect(progressText()).toBe("6 of 11 items");
+    expect(progressText()).toBe("9 of 12 items");
     fireEvent.click(readout("3/5 ⌄"));
     fireEvent.click(screen.getByText("− BIN-A (2)"));
-    expect(progressText()).toBe("5 of 11 items");
+    expect(progressText()).toBe("8 of 12 items");
     expect(readout("2/5 ⌄")).toBeTruthy();
     expect(screen.getByText("− BIN-A (1)")).toBeTruthy();
   });
@@ -194,7 +202,7 @@ describe("removing a unit", () => {
     expect(screen.queryByText("Done")).toBeNull();
     expect(queryReadout("0/5 ⌄")).toBeNull();
     expect(readout("0/5")).toBeTruthy();
-    expect(progressText()).toBe("3 of 11 items");
+    expect(progressText()).toBe("6 of 12 items");
   });
 
   it("persists the correction to the saved session", () => {
@@ -287,10 +295,94 @@ describe("removing a unit", () => {
     fireEvent.click(screen.getByText("− BIN-B (1)"));
     fireEvent.click(screen.getByText("− BIN-A (2)"));
     fireEvent.click(screen.getByText("− BIN-A (1)"));
-    expect(progressText()).toBe("3 of 11 items"); // line emptied, keys deleted
+    expect(progressText()).toBe("6 of 12 items"); // line emptied, keys deleted
     await new Promise(r => setTimeout(r, 300)); // ScanInput debounces scans <100ms apart
     scan(input, "012345678905"); // GLV-1
-    expect(progressText()).toBe("4 of 11 items");
+    expect(progressText()).toBe("7 of 12 items");
     expect(screen.getByText("BIN-A(1)")).toBeTruthy();
+  });
+});
+
+// The over-receipt banner text spans several nodes, so match on the div's
+// own textContent rather than a single text node.
+const overBanner = () =>
+  screen.queryAllByText((_, el) =>
+    el && el.tagName === "DIV" && /^⚠ \d+ items? over expected quantity$/.test(el.textContent.trim())
+  ).length > 0;
+
+// How many lines the banner is currently counting. Needed because this
+// fixture carries TWO over-received lines (BOOT-1 and CAP-1 — CAP-1 has to
+// stay over so the "still over" flash test below has a line to exercise), so
+// fixing one line's over-status doesn't clear the banner outright, only its
+// count.
+const overBannerCount = () => {
+  const el = screen.queryByText((_, e) =>
+    e && e.tagName === "DIV" && /^⚠ \d+ items? over expected quantity$/.test(e.textContent.trim())
+  );
+  if (!el) return 0;
+  const m = el.textContent.trim().match(/^⚠ (\d+)/);
+  return m ? Number(m[1]) : 0;
+};
+
+describe("over-receipt correction", () => {
+  it("BOOT-1 starts over-received", () => {
+    renderReceiveScreen();
+    // Scoped to BOOT-1's own row: CAP-1 is over too (by design, see fixture
+    // comment), so an unscoped getByText("OVER") would match two badges.
+    expect(within(readout("3/2 ⌄").parentElement).getByText("OVER")).toBeTruthy();
+    expect(overBanner()).toBe(true);
+    expect(overBannerCount()).toBe(2);
+  });
+
+  it("removing the extra unit clears BOOT-1's badge without touching CAP-1's", () => {
+    renderReceiveScreen();
+    fireEvent.click(readout("3/2 ⌄"));
+    fireEvent.click(screen.getByText("− BIN-A (3)"));
+    expect(within(readout("2/2 ✓ ⌄").parentElement).queryByText("OVER")).toBeNull();
+    // CAP-1 is still over, so the banner reflects the remaining offender
+    // rather than disappearing outright — this is what actually distinguishes
+    // "this line's flag cleared" from "nothing is over anymore".
+    expect(overBanner()).toBe(true);
+    expect(overBannerCount()).toBe(1);
+    expect(readout("2/2 ✓ ⌄")).toBeTruthy();
+  });
+
+  it("leaves the other line's over-status alone", () => {
+    renderReceiveScreen();
+    fireEvent.click(readout("3/5 ⌄"));
+    fireEvent.click(screen.getByText("− BIN-A (2)"));
+    // GLV-1 was never over; BOOT-1 (and CAP-1) still are.
+    expect(within(readout("3/2 ⌄").parentElement).getByText("OVER")).toBeTruthy();
+    expect(overBanner()).toBe(true);
+    expect(overBannerCount()).toBe(2);
+  });
+});
+
+describe("still-over flash", () => {
+  // Task 2 shipped removeOneUnit's flash feedback with no test: a removal
+  // that leaves the line STILL over remaining_qty beeps warn and flashes
+  // "extra" (purple), while one that brings it to/under remaining_qty beeps
+  // ok and flashes "ok" (green) — so a receiver never reads "still over" as
+  // "you're square now". ScanInput (src/shared.jsx) surfaces `flash` as the
+  // scan input's border-color, so that's what this asserts on.
+  it("flashes 'extra' when a removal leaves the line still over, not 'ok' like a removal that clears it", () => {
+    renderReceiveScreen();
+    const input = screen.getByPlaceholderText("Scan item UPC...");
+
+    // BOOT-1: 3 against remaining_qty 2 — removing one brings it to 2, i.e.
+    // no longer over.
+    fireEvent.click(readout("3/2 ⌄"));
+    fireEvent.click(screen.getByText("− BIN-A (3)"));
+    const okColor = input.style.borderColor;
+
+    // CAP-1: 3 against remaining_qty 1 — removing one brings it to 2, still
+    // over remaining_qty (1).
+    fireEvent.click(readout("3/1 ⌄"));
+    fireEvent.click(screen.getByText("− BIN-A (3)"));
+    const extraColor = input.style.borderColor;
+
+    expect(okColor).not.toBe(extraColor);
+    expect(extraColor).toMatch(/167,\s*139,\s*250/); // "extra" flash color
+    expect(okColor).toMatch(/34,\s*197,\s*94/); // "ok" flash color
   });
 });
