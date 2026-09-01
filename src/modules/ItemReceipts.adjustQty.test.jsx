@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { render, screen, fireEvent, cleanup, waitFor } from "@testing-library/react";
 import ItemReceipts from "./ItemReceipts";
 
@@ -266,15 +266,18 @@ describe("removing a unit", () => {
 
   it("restores scan focus when the readout closes the panel", async () => {
     renderReceiveScreen();
-    fireEvent.click(readout("3/5 ⌄"));
+    const input = screen.getByPlaceholderText("Scan item UPC...");
+    fireEvent.click(readout("3/5 ⌄")); // open
     await new Promise(r => setTimeout(r, 300)); // drain the opening focus timer
-    const r2 = readout("3/5 ⌄");
-    r2.focus();
-    fireEvent.click(r2); // toggle closed
+
+    // jsdom can't reproduce a real click-driven focus loss on the readout (a
+    // plain div, not focusable), so document.activeElement can't discriminate
+    // here. Assert the refocus actually fires instead.
+    const focusSpy = vi.spyOn(input, "focus");
+    fireEvent.click(readout("3/5 ⌄")); // toggle closed
     expect(screen.queryByText("Done")).toBeNull();
-    await waitFor(() =>
-      expect(document.activeElement).toBe(screen.getByPlaceholderText("Scan item UPC..."))
-    );
+    await waitFor(() => expect(focusSpy).toHaveBeenCalled());
+    focusSpy.mockRestore();
   });
 
   it("a removed item can be scanned back in", async () => {
