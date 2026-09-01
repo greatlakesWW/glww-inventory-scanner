@@ -76,6 +76,7 @@ export default function ItemReceipts({ onBack }) {
   const [receiptNumber, setReceiptNumber] = useState(saved?.receiptNumber || null);
   const [receiptSubmitting, setReceiptSubmitting] = useState(false);
   const [receiptSubmitted, setReceiptSubmitted] = useState(saved?.receiptSubmitted || false);
+  const [adjustingLineId, setAdjustingLineId] = useState(null); // PO line whose adjust panel is open; intentionally NOT persisted
   const scanRef = useRef(null);
   const { openDrawer, DrawerComponent } = useItemDetailDrawer(scanRef);
 
@@ -216,10 +217,64 @@ export default function ItemReceipts({ onBack }) {
 
   const switchBin = () => setCurrentBin(null);
 
+  // stopPropagation stops useScanRefocus's document listener from firing, so
+  // any handler that calls it has to put focus back itself.
+  const refocusScan = useCallback(() => {
+    setTimeout(() => scanRef.current?.focus(), 50);
+  }, []);
+
   const dismissNotOnPO = () => {
     setNotOnPO(null);
-    setTimeout(() => scanRef.current?.focus(), 50);
+    setAdjustingLineId(null); // don't let a panel hidden by the modal pop back up
+    refocusScan();
   };
+
+  // Open/close a line's adjust panel. Blocked while the not-on-PO modal is up,
+  // so the receiver deals with one thing at a time.
+  const toggleAdjust = useCallback((lineId) => {
+    if (notOnPO) return;
+    setAdjustingLineId(p => (p === lineId ? null : lineId));
+    refocusScan();
+  }, [notOnPO, refocusScan]);
+
+  const closeAdjust = useCallback(() => {
+    setAdjustingLineId(null);
+    refocusScan();
+  }, [refocusScan]);
+
+  // Take one unit of `itemId` back off `bin`. Session state only — nothing
+  // reaches NetSuite until Create Receipt. Emptied keys are deleted rather than
+  // left at 0, so the bin drops out of the row summary, the adjust panel, and
+  // the receipt payload built by getItemBinAssignments.
+  const removeOneUnit = useCallback((itemId, bin) => {
+    const binKey = `${bin}::${itemId}`;
+    if (!binItems[binKey]) { beepWarn(); return; }
+
+    const nextBinItems = { ...binItems };
+    if (nextBinItems[binKey] <= 1) delete nextBinItems[binKey];
+    else nextBinItems[binKey] -= 1;
+
+    const nextReceived = { ...receivedItems };
+    const q = (nextReceived[itemId] || 0) - 1;
+    if (q <= 0) delete nextReceived[itemId];
+    else nextReceived[itemId] = q;
+
+    setBinItems(nextBinItems);
+    setReceivedItems(nextReceived);
+
+    // Nothing left to adjust on this line — close the panel. Either way the
+    // scanner has to be refocused, because the bin button's stopPropagation
+    // kept useScanRefocus from firing.
+    if (Object.keys(nextBinItems).some(k => k.endsWith(`::${itemId}`))) refocusScan();
+    else closeAdjust();
+
+    // Match handleItemScan's feedback: green only when the line is no longer
+    // over. A removal that leaves it over must not read as "you're square".
+    const stillOver = (nextReceived[itemId] || 0) > Number(poLines.find(l => String(l.item_id) === String(itemId))?.remaining_qty ?? 0);
+    if (stillOver) beepWarn(); else beepOk();
+    setFlash(stillOver ? "extra" : "ok");
+    setTimeout(() => setFlash(null), 400);
+  }, [binItems, receivedItems, closeAdjust, refocusScan, poLines]);
 
   const totalReceived = Object.values(receivedItems).reduce((a, b) => a + b, 0);
   const totalExpected = poLines.reduce((a, l) => a + Number(l.remaining_qty), 0);
@@ -405,9 +460,11 @@ export default function ItemReceipts({ onBack }) {
               const itemBins = Object.entries(binItems)
                 .filter(([k]) => k.endsWith(`::${line.item_id}`))
                 .map(([k, q]) => ({ bin: k.split("::")[0], qty: q }));
+              const canAdjust = sessionRcvd > 0 && !notOnPO;
+              const isAdjusting = adjustingLineId === line.line_id && canAdjust;
 
               return (
-                <div key={line.item_id} onClick={(e) => { e.stopPropagation(); openDrawer(line.item_id); }} style={{ padding: "10px 0", borderTop: i > 0 ? "1px solid rgba(255,255,255,0.04)" : "none",
+                <div key={line.line_id} onClick={(e) => { e.stopPropagation(); openDrawer(line.item_id); }} style={{ padding: "10px 0", borderTop: i > 0 ? "1px solid rgba(255,255,255,0.04)" : "none",
                   opacity: isDone ? 0.45 : 1, cursor: "pointer", touchAction: "manipulation" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <div>
@@ -421,11 +478,54 @@ export default function ItemReceipts({ onBack }) {
                     </div>
                     <div style={{ textAlign: "right", display: "flex", alignItems: "center", gap: 8 }}>
                       {isOver && <OverBadge />}
-                      <div style={{ fontSize: 16, fontWeight: 700, ...mono, color }}>
-                        {rcvd}/{ordered} {isFull && "✓"}
+                      <div
+                        onClick={canAdjust ? (e) => { e.stopPropagation(); toggleAdjust(line.line_id); } : undefined}
+                        style={{
+                          fontSize: 16, fontWeight: 700, ...mono, color,
+                          padding: canAdjust ? "4px 8px" : 0,
+                          borderRadius: 6,
+                          border: `1px solid ${canAdjust ? "rgba(255,255,255,0.15)" : "transparent"}`,
+                          cursor: canAdjust ? "pointer" : "default",
+                          touchAction: "manipulation",
+                        }}
+                      >
+                        {rcvd}/{ordered}{isFull && " ✓"}{canAdjust && " ⌄"}
                       </div>
                     </div>
                   </div>
+
+                  {/* Adjust panel — remove one unit, attributed to a bin. */}
+                  {isAdjusting && (
+                    <div
+                      onClick={(e) => { e.stopPropagation(); refocusScan(); }}
+                      style={{
+                        marginTop: 8, padding: 8, borderRadius: 8,
+                        background: "rgba(255,255,255,0.03)",
+                        border: "1px solid rgba(255,255,255,0.08)",
+                      }}
+                    >
+                      <div style={{ fontSize: 10, color: "#94a3b8", textTransform: "uppercase",
+                        letterSpacing: 0.5, fontWeight: 700, marginBottom: 6 }}>
+                        Remove one from
+                      </div>
+                      {itemBins.map(b => (
+                        <button
+                          key={b.bin}
+                          onClick={(e) => { e.stopPropagation(); removeOneUnit(line.item_id, b.bin); }}
+                          style={{ ...S.btnSm, display: "block", width: "100%", minHeight: 44,
+                            marginBottom: 6, textAlign: "left", fontSize: 14, ...mono }}
+                        >
+                          {`− ${b.bin} (${b.qty})`}
+                        </button>
+                      ))}
+                      <button
+                        onClick={(e) => { e.stopPropagation(); closeAdjust(); }}
+                        style={{ ...S.btnSm, display: "block", width: "100%", minHeight: 40, fontSize: 13 }}
+                      >
+                        Done
+                      </button>
+                    </div>
+                  )}
                 </div>
               );
             })}
