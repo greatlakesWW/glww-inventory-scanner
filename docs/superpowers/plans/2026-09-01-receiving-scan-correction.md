@@ -38,6 +38,8 @@ No other file changes. No new session fields, so a session already saved on a ha
 
 ### Task 1: Adjust panel opens and closes
 
+> **Executed and revised.** Shipped as `e464545` + `3841369` + `6ff00bf`. Two review rounds changed the code below, so read the committed source as authoritative, not these snippets. What changed: a `refocusScan()` helper and a `closeAdjust()` helper were extracted, and **every** `stopPropagation` path now restores scan focus — including the bin button, which does it via `removeOneUnit` itself rather than its `onClick` (the button's own `stopPropagation` stops the click reaching the panel wrapper). `dismissNotOnPO` also clears `adjustingItemId`. A row-local `const isAdjusting = adjustingItemId === line.item_id && canAdjust` gates the panel. The fixture gained a fourth line (SOCK-1, received on a prior receipt, no session scans) and the test file has 9 tests. The `readout`/`queryReadout` helpers use a structural containment check for collisions, not a hit count.
+
 **Files:**
 - Create: `src/modules/ItemReceipts.adjustQty.test.jsx`
 - Modify: `src/modules/ItemReceipts.jsx` (state near line 78, handler near line 219, render near lines 420–427)
@@ -293,7 +295,7 @@ Note the closing `</div>` of the inner flex row moved above the panel — the pa
 npx vitest run src/modules/ItemReceipts.adjustQty.test.jsx
 ```
 
-Expected: PASS, 7 tests.
+Expected: PASS, 9 tests.
 
 - [ ] **Step 7: Run the full suite for regressions**
 
@@ -379,8 +381,37 @@ describe("removing a unit", () => {
     expect(saved.binItems["BIN-A::555"]).toBe(1);
     expect(saved.adjustingItemId).toBeUndefined();
   });
+
+  // Scan focus is THE hazard in this feature: every panel handler calls
+  // stopPropagation, which stops useScanRefocus's document listener from
+  // firing, so each one has to refocus the input itself. This was missed twice
+  // during Task 1 and no DOM-presence assertion can catch it — a receiver just
+  // finds their scanner has stopped working, with nothing on screen to explain
+  // why. These two tests pin it.
+  it("restores scan focus after removing a unit", async () => {
+    renderReceiveScreen();
+    fireEvent.click(readout("3/5 ⌄"));
+    fireEvent.click(screen.getByText("− BIN-A (2)"));
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByPlaceholderText("Scan item UPC..."))
+    );
+  });
+
+  it("restores scan focus when removing the last unit closes the panel", async () => {
+    renderReceiveScreen();
+    fireEvent.click(readout("3/5 ⌄"));
+    fireEvent.click(screen.getByText("− BIN-B (1)"));
+    fireEvent.click(screen.getByText("− BIN-A (2)"));
+    fireEvent.click(screen.getByText("− BIN-A (1)"));
+    expect(screen.queryByText("Done")).toBeNull(); // panel gone
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByPlaceholderText("Scan item UPC..."))
+    );
+  });
 });
 ```
+
+`waitFor` must be added to the `@testing-library/react` import at the top of the file. It polls on real timers until the handler's `setTimeout(..., 50)` fires.
 
 - [ ] **Step 2: Run the test and verify it fails**
 
@@ -388,7 +419,7 @@ describe("removing a unit", () => {
 npx vitest run src/modules/ItemReceipts.adjustQty.test.jsx
 ```
 
-Expected: FAIL on the first new test — `progressText()` still returns `"6 of 11 items"` after the tap, because `removeOneUnit` is the empty stub.
+Expected: FAIL on the new tests — `progressText()` still returns `"6 of 11 items"` after the tap, and the focus assertions time out, because `removeOneUnit` still only calls `refocusScan()`.
 
 - [ ] **Step 3: Implement removeOneUnit**
 
@@ -412,25 +443,28 @@ with:
     const nextBinItems = { ...binItems };
     if (nextBinItems[binKey] <= 1) delete nextBinItems[binKey];
     else nextBinItems[binKey] -= 1;
+
+    const nextReceived = { ...receivedItems };
+    const q = (nextReceived[itemId] || 0) - 1;
+    if (q <= 0) delete nextReceived[itemId];
+    else nextReceived[itemId] = q;
+
     setBinItems(nextBinItems);
+    setReceivedItems(nextReceived);
 
-    setReceivedItems(p => {
-      const next = { ...p };
-      const q = (next[itemId] || 0) - 1;
-      if (q <= 0) delete next[itemId];
-      else next[itemId] = q;
-      return next;
-    });
-
-    // Nothing left to adjust on this line — close the panel.
-    if (!Object.keys(nextBinItems).some(k => k.endsWith(`::${itemId}`))) {
-      setAdjustingItemId(null);
-    }
+    // Nothing left to adjust on this line — close the panel. Either way the
+    // scanner has to be refocused, because the bin button's stopPropagation
+    // kept useScanRefocus from firing.
+    if (Object.keys(nextBinItems).some(k => k.endsWith(`::${itemId}`))) refocusScan();
+    else closeAdjust();
 
     beepOk(); setFlash("ok"); setTimeout(() => setFlash(null), 400);
-    setTimeout(() => scanRef.current?.focus(), 50);
-  }, [binItems]);
+  }, [binItems, receivedItems, closeAdjust, refocusScan]);
 ```
+
+Both maps are read from the closure and written as plain objects rather than one closure read and one functional update. React 18 flushes discrete click events synchronously, so a fast double-tap cannot interleave here — but keeping one style makes that easy to see, and `nextBinItems` has to be a concrete value anyway to decide whether the panel closes.
+
+`refocusScan` and `closeAdjust` were added to `ItemReceipts.jsx` during Task 1's review fixes; reuse them rather than re-inlining `setAdjustingItemId(null)` and the `setTimeout` focus call.
 
 - [ ] **Step 4: Run the test and verify it passes**
 
@@ -438,7 +472,7 @@ with:
 npx vitest run src/modules/ItemReceipts.adjustQty.test.jsx
 ```
 
-Expected: PASS, 12 tests.
+Expected: PASS, 16 tests.
 
 - [ ] **Step 5: Run the full suite**
 
@@ -511,7 +545,7 @@ describe("over-receipt correction", () => {
 npx vitest run src/modules/ItemReceipts.adjustQty.test.jsx
 ```
 
-Expected: PASS, 15 tests. These assert emergent behaviour, so they should pass without new code. If the second test fails on `readout("2/2 ✓ ⌄")`, check that the readout renders the `✓` and the `⌄` with a space between them as written in Task 1 Step 5 — the `norm` helper strips whitespace, so only the character order matters.
+Expected: PASS, 19 tests. These assert emergent behaviour, so they should pass without new code. If the second test fails on `readout("2/2 ✓ ⌄")`, check that the readout renders the `✓` and the `⌄` with a space between them as written in Task 1 Step 5 — the `norm` helper strips whitespace, so only the character order matters.
 
 - [ ] **Step 3: Run the full suite**
 
@@ -537,7 +571,10 @@ Automated tests do not cover the handheld's scanner focus behaviour. After Task 
 - [ ] `npm run dev`, open Item Receipts, scan a PO, scan a bin, scan an item three times.
 - [ ] Tap the qty readout. Panel opens; the bin and its count are correct.
 - [ ] Tap the bin row. Count drops, a confirmation beep fires, and the cursor is back in the scan input — type a character and confirm it lands in the scan box, not nowhere.
+- [ ] Tap the readout again to close the panel without removing anything, then type a character — it must land in the scan box. (This path closes the panel via `toggleAdjust`, which is the one most likely to leave the scanner dead.)
+- [ ] Tap the panel's background — the padding around the buttons, or the "Remove one from" label — then type a character. It must land in the scan box.
 - [ ] Tap Done. Panel closes, scan input is focused again.
+- [ ] Over-scan a line, then remove **two** units with the panel open. The list sorts fully-received lines to the bottom (`ItemReceipts.jsx:395`), so the row can re-sort mid-correction — confirm the row and its open panel don't jump somewhere surprising under your finger.
 - [ ] Tap the row (not the readout). The item detail drawer still opens as before. It may error with "NetSuite 500" — that is the pre-existing bug tracked separately, not a regression from this work.
 - [ ] Refresh the page, tap Resume Session. The corrected counts come back and no panel is open.
 
