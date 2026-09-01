@@ -204,7 +204,7 @@ describe("removing a unit", () => {
     const saved = JSON.parse(localStorage.getItem(SESSION_KEY));
     expect(saved.receivedItems["555"]).toBe(2);
     expect(saved.binItems["BIN-A::555"]).toBe(1);
-    expect(saved.adjustingItemId).toBeUndefined();
+    expect(saved.adjustingLineId).toBeUndefined();
   });
 
   // Scan focus is THE hazard in this feature: every panel handler calls
@@ -241,11 +241,37 @@ describe("removing a unit", () => {
     binA2.focus();
     fireEvent.click(binA2);
 
+    await new Promise(r => setTimeout(r, 300)); // drain clicks 1-2's focus timers
     const binA1 = screen.getByText("− BIN-A (1)");
     binA1.focus();
     fireEvent.click(binA1);
 
     expect(screen.queryByText("Done")).toBeNull(); // panel gone
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByPlaceholderText("Scan item UPC..."))
+    );
+  });
+
+  it("restores scan focus when Done closes the panel", async () => {
+    renderReceiveScreen();
+    fireEvent.click(readout("3/5 ⌄"));
+    await new Promise(r => setTimeout(r, 300)); // drain toggleAdjust's focus timer
+    const done = screen.getByText("Done");
+    done.focus();
+    fireEvent.click(done);
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByPlaceholderText("Scan item UPC..."))
+    );
+  });
+
+  it("restores scan focus when the readout closes the panel", async () => {
+    renderReceiveScreen();
+    fireEvent.click(readout("3/5 ⌄"));
+    await new Promise(r => setTimeout(r, 300)); // drain the opening focus timer
+    const r2 = readout("3/5 ⌄");
+    r2.focus();
+    fireEvent.click(r2); // toggle closed
+    expect(screen.queryByText("Done")).toBeNull();
     await waitFor(() =>
       expect(document.activeElement).toBe(screen.getByPlaceholderText("Scan item UPC..."))
     );

@@ -464,7 +464,7 @@ export default function ItemReceipts({ onBack }) {
               const isAdjusting = adjustingLineId === line.line_id && canAdjust;
 
               return (
-                <div key={line.item_id} onClick={(e) => { e.stopPropagation(); openDrawer(line.item_id); }} style={{ padding: "10px 0", borderTop: i > 0 ? "1px solid rgba(255,255,255,0.04)" : "none",
+                <div key={line.line_id} onClick={(e) => { e.stopPropagation(); openDrawer(line.item_id); }} style={{ padding: "10px 0", borderTop: i > 0 ? "1px solid rgba(255,255,255,0.04)" : "none",
                   opacity: isDone ? 0.45 : 1, cursor: "pointer", touchAction: "manipulation" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <div>
