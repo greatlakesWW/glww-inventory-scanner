@@ -242,12 +242,34 @@ export default function ItemReceipts({ onBack }) {
     refocusScan();
   }, [refocusScan]);
 
-  // Task 2 implements the actual removal. Focus restoration lives here rather
-  // than in the button's onClick, because the button's stopPropagation keeps
-  // the click from reaching the panel wrapper's handler.
+  // Take one unit of `itemId` back off `bin`. Session state only — nothing
+  // reaches NetSuite until Create Receipt. Emptied keys are deleted rather than
+  // left at 0, so the bin drops out of the row summary, the adjust panel, and
+  // the receipt payload built by getItemBinAssignments.
   const removeOneUnit = useCallback((itemId, bin) => {
-    refocusScan();
-  }, [refocusScan]);
+    const binKey = `${bin}::${itemId}`;
+    if (!binItems[binKey]) return;
+
+    const nextBinItems = { ...binItems };
+    if (nextBinItems[binKey] <= 1) delete nextBinItems[binKey];
+    else nextBinItems[binKey] -= 1;
+
+    const nextReceived = { ...receivedItems };
+    const q = (nextReceived[itemId] || 0) - 1;
+    if (q <= 0) delete nextReceived[itemId];
+    else nextReceived[itemId] = q;
+
+    setBinItems(nextBinItems);
+    setReceivedItems(nextReceived);
+
+    // Nothing left to adjust on this line — close the panel. Either way the
+    // scanner has to be refocused, because the bin button's stopPropagation
+    // kept useScanRefocus from firing.
+    if (Object.keys(nextBinItems).some(k => k.endsWith(`::${itemId}`))) refocusScan();
+    else closeAdjust();
+
+    beepOk(); setFlash("ok"); setTimeout(() => setFlash(null), 400);
+  }, [binItems, receivedItems, closeAdjust, refocusScan]);
 
   const totalReceived = Object.values(receivedItems).reduce((a, b) => a + b, 0);
   const totalExpected = poLines.reduce((a, l) => a + Number(l.remaining_qty), 0);

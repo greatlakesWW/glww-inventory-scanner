@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, afterEach } from "vitest";
-import { render, screen, fireEvent, cleanup } from "@testing-library/react";
+import { render, screen, fireEvent, cleanup, waitFor } from "@testing-library/react";
 import ItemReceipts from "./ItemReceipts";
 
 const SESSION_KEY = "glww_item_receipts";
@@ -147,5 +147,90 @@ describe("adjust panel open/close", () => {
     renderReceiveScreen();
     // norm() strips whitespace, so every other assertion here is blind to this.
     expect(readout("3/5 ⌄").textContent).toBe("3/5 ⌄");
+  });
+});
+
+// The "N of M items" progress readout. Function matcher because the span has
+// multiple text children, and ancestors would also regex-match textContent.
+const progressText = () =>
+  screen.getByText((_, el) => el.tagName === "SPAN" && /of 11 items$/.test(el.textContent)).textContent;
+
+describe("removing a unit", () => {
+  it("drops the line total and the bin count by one", () => {
+    renderReceiveScreen();
+    expect(progressText()).toBe("6 of 11 items");
+    fireEvent.click(readout("3/5 ⌄"));
+    fireEvent.click(screen.getByText("− BIN-A (2)"));
+    expect(progressText()).toBe("5 of 11 items");
+    expect(readout("2/5 ⌄")).toBeTruthy();
+    expect(screen.getByText("− BIN-A (1)")).toBeTruthy();
+  });
+
+  it("only touches the bin that was tapped", () => {
+    renderReceiveScreen();
+    fireEvent.click(readout("3/5 ⌄"));
+    fireEvent.click(screen.getByText("− BIN-B (1)"));
+    // BIN-A untouched at 2, BIN-B emptied and gone from the row summary.
+    expect(screen.getByText("BIN-A(2)")).toBeTruthy();
+    expect(readout("2/5 ⌄")).toBeTruthy();
+  });
+
+  it("removes a bin from the panel and the row summary once it empties", () => {
+    renderReceiveScreen();
+    expect(screen.getByText("BIN-A(2), BIN-B(1)")).toBeTruthy();
+    fireEvent.click(readout("3/5 ⌄"));
+    fireEvent.click(screen.getByText("− BIN-B (1)"));
+    expect(screen.queryByText("− BIN-B (1)")).toBeNull();
+    expect(screen.queryByText("− BIN-B (0)")).toBeNull();
+    expect(screen.getByText("BIN-A(2)")).toBeTruthy();
+  });
+
+  it("closes the panel and drops the caret when the line reaches zero", () => {
+    renderReceiveScreen();
+    fireEvent.click(readout("3/5 ⌄"));
+    fireEvent.click(screen.getByText("− BIN-B (1)"));
+    fireEvent.click(screen.getByText("− BIN-A (2)"));
+    fireEvent.click(screen.getByText("− BIN-A (1)"));
+    expect(screen.queryByText("Done")).toBeNull();
+    expect(queryReadout("0/5 ⌄")).toBeNull();
+    expect(readout("0/5")).toBeTruthy();
+    expect(progressText()).toBe("3 of 11 items");
+  });
+
+  it("persists the correction to the saved session", () => {
+    renderReceiveScreen();
+    fireEvent.click(readout("3/5 ⌄"));
+    fireEvent.click(screen.getByText("− BIN-A (2)"));
+    const saved = JSON.parse(localStorage.getItem(SESSION_KEY));
+    expect(saved.receivedItems["555"]).toBe(2);
+    expect(saved.binItems["BIN-A::555"]).toBe(1);
+    expect(saved.adjustingItemId).toBeUndefined();
+  });
+
+  // Scan focus is THE hazard in this feature: every panel handler calls
+  // stopPropagation, which stops useScanRefocus's document listener from
+  // firing, so each one has to refocus the input itself. This was missed twice
+  // during Task 1 and no DOM-presence assertion can catch it — a receiver just
+  // finds their scanner has stopped working, with nothing on screen to explain
+  // why. These two tests pin it.
+  it("restores scan focus after removing a unit", async () => {
+    renderReceiveScreen();
+    fireEvent.click(readout("3/5 ⌄"));
+    fireEvent.click(screen.getByText("− BIN-A (2)"));
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByPlaceholderText("Scan item UPC..."))
+    );
+  });
+
+  it("restores scan focus when removing the last unit closes the panel", async () => {
+    renderReceiveScreen();
+    fireEvent.click(readout("3/5 ⌄"));
+    fireEvent.click(screen.getByText("− BIN-B (1)"));
+    fireEvent.click(screen.getByText("− BIN-A (2)"));
+    fireEvent.click(screen.getByText("− BIN-A (1)"));
+    expect(screen.queryByText("Done")).toBeNull(); // panel gone
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByPlaceholderText("Scan item UPC..."))
+    );
   });
 });
