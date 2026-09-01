@@ -217,16 +217,17 @@ export default function ItemReceipts({ onBack }) {
 
   const switchBin = () => setCurrentBin(null);
 
-  const dismissNotOnPO = () => {
-    setNotOnPO(null);
-    setTimeout(() => scanRef.current?.focus(), 50);
-  };
-
   // stopPropagation stops useScanRefocus's document listener from firing, so
   // any handler that calls it has to put focus back itself.
   const refocusScan = useCallback(() => {
     setTimeout(() => scanRef.current?.focus(), 50);
   }, []);
+
+  const dismissNotOnPO = () => {
+    setNotOnPO(null);
+    setAdjustingItemId(null); // don't let a panel hidden by the modal pop back up
+    refocusScan();
+  };
 
   // Open/close a line's adjust panel. Blocked while the not-on-PO modal is up,
   // so the receiver deals with one thing at a time.
@@ -241,7 +242,12 @@ export default function ItemReceipts({ onBack }) {
     refocusScan();
   }, [refocusScan]);
 
-  const removeOneUnit = useCallback((itemId, bin) => {}, []); // implemented in Task 2
+  // Task 2 implements the actual removal. Focus restoration lives here rather
+  // than in the button's onClick, because the button's stopPropagation keeps
+  // the click from reaching the panel wrapper's handler.
+  const removeOneUnit = useCallback((itemId, bin) => {
+    refocusScan();
+  }, [refocusScan]);
 
   const totalReceived = Object.values(receivedItems).reduce((a, b) => a + b, 0);
   const totalExpected = poLines.reduce((a, l) => a + Number(l.remaining_qty), 0);

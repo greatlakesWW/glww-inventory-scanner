@@ -47,15 +47,24 @@ function renderReceiveScreen() {
 const norm = (s) => (s || "").replace(/\s+/g, "");
 const readout = (label) => {
   const hits = screen.getAllByText((_, el) => el && norm(el.textContent) === norm(label));
-  // Exactly two: the flex wrapper and the inner readout div, which share
-  // textContent. More than two means two rows collide on the same label and
-  // this helper would silently target the wrong one.
-  if (hits.length > 2) throw new Error(`readout("${label}") matched ${hits.length} elements — ambiguous`);
-  return hits[hits.length - 1];
+  const last = hits[hits.length - 1];
+  // Hits within one row are always a nested chain — the flex wrapper plus the
+  // inner readout div, or just the inner div when an OVER badge makes the
+  // wrapper's text differ. A hit that does not contain `last` is a *second row*
+  // colliding on the same label, which would silently target the wrong row.
+  if (hits.some(el => el !== last && !el.contains(last))) {
+    throw new Error(`readout("${label}") matched ${hits.length} elements across rows — ambiguous`);
+  }
+  return last;
 };
 const queryReadout = (label) => {
   const hits = screen.queryAllByText((_, el) => el && norm(el.textContent) === norm(label));
-  return hits.length ? hits[hits.length - 1] : null;
+  if (!hits.length) return null;
+  const last = hits[hits.length - 1];
+  if (hits.some(el => el !== last && !el.contains(last))) {
+    throw new Error(`queryReadout("${label}") matched ${hits.length} elements across rows — ambiguous`);
+  }
+  return last;
 };
 
 // Simulate a scanner gun: type the value, then Enter.
@@ -132,5 +141,11 @@ describe("adjust panel open/close", () => {
     expect(queryReadout("3/3 ✓ ⌄")).toBeNull();
     fireEvent.click(readout("3/3 ✓"));
     expect(screen.queryByText("Done")).toBeNull();
+  });
+
+  it("renders exactly one space before the caret", () => {
+    renderReceiveScreen();
+    // norm() strips whitespace, so every other assertion here is blind to this.
+    expect(readout("3/5 ⌄").textContent).toBe("3/5 ⌄");
   });
 });
