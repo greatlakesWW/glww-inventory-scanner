@@ -216,7 +216,13 @@ describe("removing a unit", () => {
   it("restores scan focus after removing a unit", async () => {
     renderReceiveScreen();
     fireEvent.click(readout("3/5 ⌄"));
-    fireEvent.click(screen.getByText("− BIN-A (2)"));
+    // Drain toggleAdjust's pending setTimeout(focus, 50) — otherwise it
+    // refocuses the input for us and this test passes no matter what
+    // removeOneUnit does.
+    await new Promise(r => setTimeout(r, 300));
+    const btn = screen.getByText("− BIN-A (2)");
+    btn.focus(); // fireEvent.click alone never moves focus in jsdom
+    fireEvent.click(btn);
     await waitFor(() =>
       expect(document.activeElement).toBe(screen.getByPlaceholderText("Scan item UPC..."))
     );
@@ -225,12 +231,37 @@ describe("removing a unit", () => {
   it("restores scan focus when removing the last unit closes the panel", async () => {
     renderReceiveScreen();
     fireEvent.click(readout("3/5 ⌄"));
-    fireEvent.click(screen.getByText("− BIN-B (1)"));
-    fireEvent.click(screen.getByText("− BIN-A (2)"));
-    fireEvent.click(screen.getByText("− BIN-A (1)"));
+    await new Promise(r => setTimeout(r, 300));
+
+    const binB = screen.getByText("− BIN-B (1)");
+    binB.focus();
+    fireEvent.click(binB);
+
+    const binA2 = screen.getByText("− BIN-A (2)");
+    binA2.focus();
+    fireEvent.click(binA2);
+
+    const binA1 = screen.getByText("− BIN-A (1)");
+    binA1.focus();
+    fireEvent.click(binA1);
+
     expect(screen.queryByText("Done")).toBeNull(); // panel gone
     await waitFor(() =>
       expect(document.activeElement).toBe(screen.getByPlaceholderText("Scan item UPC..."))
     );
+  });
+
+  it("a removed item can be scanned back in", async () => {
+    renderReceiveScreen();
+    const input = screen.getByPlaceholderText("Scan item UPC...");
+    fireEvent.click(readout("3/5 ⌄"));
+    fireEvent.click(screen.getByText("− BIN-B (1)"));
+    fireEvent.click(screen.getByText("− BIN-A (2)"));
+    fireEvent.click(screen.getByText("− BIN-A (1)"));
+    expect(progressText()).toBe("3 of 11 items"); // line emptied, keys deleted
+    await new Promise(r => setTimeout(r, 300)); // ScanInput debounces scans <100ms apart
+    scan(input, "012345678905"); // GLV-1
+    expect(progressText()).toBe("4 of 11 items");
+    expect(screen.getByText("BIN-A(1)")).toBeTruthy();
   });
 });

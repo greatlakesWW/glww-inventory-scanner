@@ -76,7 +76,7 @@ export default function ItemReceipts({ onBack }) {
   const [receiptNumber, setReceiptNumber] = useState(saved?.receiptNumber || null);
   const [receiptSubmitting, setReceiptSubmitting] = useState(false);
   const [receiptSubmitted, setReceiptSubmitted] = useState(saved?.receiptSubmitted || false);
-  const [adjustingItemId, setAdjustingItemId] = useState(null); // line whose adjust panel is open; intentionally NOT persisted
+  const [adjustingLineId, setAdjustingLineId] = useState(null); // PO line whose adjust panel is open; intentionally NOT persisted
   const scanRef = useRef(null);
   const { openDrawer, DrawerComponent } = useItemDetailDrawer(scanRef);
 
@@ -225,20 +225,20 @@ export default function ItemReceipts({ onBack }) {
 
   const dismissNotOnPO = () => {
     setNotOnPO(null);
-    setAdjustingItemId(null); // don't let a panel hidden by the modal pop back up
+    setAdjustingLineId(null); // don't let a panel hidden by the modal pop back up
     refocusScan();
   };
 
   // Open/close a line's adjust panel. Blocked while the not-on-PO modal is up,
   // so the receiver deals with one thing at a time.
-  const toggleAdjust = useCallback((itemId) => {
+  const toggleAdjust = useCallback((lineId) => {
     if (notOnPO) return;
-    setAdjustingItemId(p => (p === itemId ? null : itemId));
+    setAdjustingLineId(p => (p === lineId ? null : lineId));
     refocusScan();
   }, [notOnPO, refocusScan]);
 
   const closeAdjust = useCallback(() => {
-    setAdjustingItemId(null);
+    setAdjustingLineId(null);
     refocusScan();
   }, [refocusScan]);
 
@@ -248,7 +248,7 @@ export default function ItemReceipts({ onBack }) {
   // the receipt payload built by getItemBinAssignments.
   const removeOneUnit = useCallback((itemId, bin) => {
     const binKey = `${bin}::${itemId}`;
-    if (!binItems[binKey]) return;
+    if (!binItems[binKey]) { beepWarn(); return; }
 
     const nextBinItems = { ...binItems };
     if (nextBinItems[binKey] <= 1) delete nextBinItems[binKey];
@@ -268,8 +268,13 @@ export default function ItemReceipts({ onBack }) {
     if (Object.keys(nextBinItems).some(k => k.endsWith(`::${itemId}`))) refocusScan();
     else closeAdjust();
 
-    beepOk(); setFlash("ok"); setTimeout(() => setFlash(null), 400);
-  }, [binItems, receivedItems, closeAdjust, refocusScan]);
+    // Match handleItemScan's feedback: green only when the line is no longer
+    // over. A removal that leaves it over must not read as "you're square".
+    const stillOver = (nextReceived[itemId] || 0) > Number(poLines.find(l => String(l.item_id) === String(itemId))?.remaining_qty ?? 0);
+    if (stillOver) beepWarn(); else beepOk();
+    setFlash(stillOver ? "extra" : "ok");
+    setTimeout(() => setFlash(null), 400);
+  }, [binItems, receivedItems, closeAdjust, refocusScan, poLines]);
 
   const totalReceived = Object.values(receivedItems).reduce((a, b) => a + b, 0);
   const totalExpected = poLines.reduce((a, l) => a + Number(l.remaining_qty), 0);
@@ -456,7 +461,7 @@ export default function ItemReceipts({ onBack }) {
                 .filter(([k]) => k.endsWith(`::${line.item_id}`))
                 .map(([k, q]) => ({ bin: k.split("::")[0], qty: q }));
               const canAdjust = sessionRcvd > 0 && !notOnPO;
-              const isAdjusting = adjustingItemId === line.item_id && canAdjust;
+              const isAdjusting = adjustingLineId === line.line_id && canAdjust;
 
               return (
                 <div key={line.item_id} onClick={(e) => { e.stopPropagation(); openDrawer(line.item_id); }} style={{ padding: "10px 0", borderTop: i > 0 ? "1px solid rgba(255,255,255,0.04)" : "none",
@@ -474,7 +479,7 @@ export default function ItemReceipts({ onBack }) {
                     <div style={{ textAlign: "right", display: "flex", alignItems: "center", gap: 8 }}>
                       {isOver && <OverBadge />}
                       <div
-                        onClick={canAdjust ? (e) => { e.stopPropagation(); toggleAdjust(line.item_id); } : undefined}
+                        onClick={canAdjust ? (e) => { e.stopPropagation(); toggleAdjust(line.line_id); } : undefined}
                         style={{
                           fontSize: 16, fontWeight: 700, ...mono, color,
                           padding: canAdjust ? "4px 8px" : 0,
