@@ -76,6 +76,7 @@ export default function ItemReceipts({ onBack }) {
   const [receiptNumber, setReceiptNumber] = useState(saved?.receiptNumber || null);
   const [receiptSubmitting, setReceiptSubmitting] = useState(false);
   const [receiptSubmitted, setReceiptSubmitted] = useState(saved?.receiptSubmitted || false);
+  const [adjustingItemId, setAdjustingItemId] = useState(null); // line whose adjust panel is open; intentionally NOT persisted
   const scanRef = useRef(null);
   const { openDrawer, DrawerComponent } = useItemDetailDrawer(scanRef);
 
@@ -220,6 +221,15 @@ export default function ItemReceipts({ onBack }) {
     setNotOnPO(null);
     setTimeout(() => scanRef.current?.focus(), 50);
   };
+
+  // Open/close a line's adjust panel. Blocked while the not-on-PO modal is up,
+  // so the receiver deals with one thing at a time.
+  const toggleAdjust = useCallback((itemId) => {
+    if (notOnPO) return;
+    setAdjustingItemId(p => (p === itemId ? null : itemId));
+  }, [notOnPO]);
+
+  const removeOneUnit = useCallback((itemId, bin) => {}, []); // implemented in Task 2
 
   const totalReceived = Object.values(receivedItems).reduce((a, b) => a + b, 0);
   const totalExpected = poLines.reduce((a, l) => a + Number(l.remaining_qty), 0);
@@ -405,6 +415,7 @@ export default function ItemReceipts({ onBack }) {
               const itemBins = Object.entries(binItems)
                 .filter(([k]) => k.endsWith(`::${line.item_id}`))
                 .map(([k, q]) => ({ bin: k.split("::")[0], qty: q }));
+              const canAdjust = sessionRcvd > 0 && !notOnPO;
 
               return (
                 <div key={line.item_id} onClick={(e) => { e.stopPropagation(); openDrawer(line.item_id); }} style={{ padding: "10px 0", borderTop: i > 0 ? "1px solid rgba(255,255,255,0.04)" : "none",
@@ -421,11 +432,58 @@ export default function ItemReceipts({ onBack }) {
                     </div>
                     <div style={{ textAlign: "right", display: "flex", alignItems: "center", gap: 8 }}>
                       {isOver && <OverBadge />}
-                      <div style={{ fontSize: 16, fontWeight: 700, ...mono, color }}>
-                        {rcvd}/{ordered} {isFull && "✓"}
+                      <div
+                        onClick={canAdjust ? (e) => { e.stopPropagation(); toggleAdjust(line.item_id); } : undefined}
+                        style={{
+                          fontSize: 16, fontWeight: 700, ...mono, color,
+                          padding: canAdjust ? "4px 8px" : 0,
+                          borderRadius: 6,
+                          border: `1px solid ${canAdjust ? "rgba(255,255,255,0.15)" : "transparent"}`,
+                          cursor: canAdjust ? "pointer" : "default",
+                          touchAction: "manipulation",
+                        }}
+                      >
+                        {rcvd}/{ordered} {isFull && "✓"} {canAdjust && "⌄"}
                       </div>
                     </div>
                   </div>
+
+                  {/* Adjust panel — remove one unit, attributed to a bin. */}
+                  {adjustingItemId === line.item_id && (
+                    <div
+                      onClick={(e) => e.stopPropagation()}
+                      style={{
+                        marginTop: 8, padding: 8, borderRadius: 8,
+                        background: "rgba(255,255,255,0.03)",
+                        border: "1px solid rgba(255,255,255,0.08)",
+                      }}
+                    >
+                      <div style={{ fontSize: 10, color: "#94a3b8", textTransform: "uppercase",
+                        letterSpacing: 0.5, fontWeight: 700, marginBottom: 6 }}>
+                        Remove one from
+                      </div>
+                      {itemBins.map(b => (
+                        <button
+                          key={b.bin}
+                          onClick={(e) => { e.stopPropagation(); removeOneUnit(line.item_id, b.bin); }}
+                          style={{ ...S.btnSm, display: "block", width: "100%", minHeight: 44,
+                            marginBottom: 6, textAlign: "left", fontSize: 14, ...mono }}
+                        >
+                          {`− ${b.bin} (${b.qty})`}
+                        </button>
+                      ))}
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setAdjustingItemId(null);
+                          setTimeout(() => scanRef.current?.focus(), 50);
+                        }}
+                        style={{ ...S.btnSm, display: "block", width: "100%", minHeight: 40, fontSize: 13 }}
+                      >
+                        Done
+                      </button>
+                    </div>
+                  )}
                 </div>
               );
             })}
